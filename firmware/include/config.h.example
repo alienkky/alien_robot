@@ -1,0 +1,19 @@
+#pragma once
+
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// Example: "http://192.168.0.20:8787"
+#define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
+
+// GPIO pins. Adjust for your board and wiring.
+#define PIN_BUTTON 0
+#define PIN_STATUS_LED 2
+
+#define I2S_MIC_BCLK 4
+#define I2S_MIC_WS 5
+#define I2S_MIC_DIN 6
+
+#define I2S_SPK_BCLK 15
+#define I2S_SPK_WS 16
+#define I2S_SPK_DOUT 17
