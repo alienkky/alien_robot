@@ -1,0 +1,85 @@
+# Alien Robot — vLLM + xiaozhi-server 배포 스택
+# 사용법: 이 파일이 있는 deploy/ 폴더에서 `docker compose up -d`
+# 전제: 4090 PC / WSL2 / NVIDIA Container Toolkit 설치됨
+
+version: '3.8'
+
+services:
+  # ───────────────────────────────────────────────
+  # 1. vLLM — Qwen3.6-27B (LLM + 비전 통합 엔드포인트)
+  # ───────────────────────────────────────────────
+  vllm:
+    image: vllm/vllm-openai:latest   # vLLM >= 0.19.0 필수
+    container_name: aa-vllm-qwen36
+    restart: unless-stopped
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    ports:
+      - "8000:8000"
+    command: >
+      --model Lorbus/Qwen3.6-27B-int4-AutoRound
+      --served-model-name qwen36
+      --max-model-len 16384
+      --gpu-memory-utilization 0.82
+      --reasoning-parser qwen3
+      --enable-auto-tool-choice
+      --tool-call-parser qwen3_coder
+      --limit-mm-per-prompt image=2
+      --host 0.0.0.0
+      --port 8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [compute, utility]
+
+  # ───────────────────────────────────────────────
+  # 2. xiaozhi-server — 오케스트레이션 (ASR + TTS + WebSocket)
+  # ───────────────────────────────────────────────
+  xiaozhi-server:
+    image: ghcr.io/xinnan-tech/xiaozhi-esp32-server:server_latest
+    container_name: aa-xiaozhi-server
+    restart: unless-stopped
+    depends_on:
+      - vllm
+    ports:
+      - "8003:8000"     # WebSocket (ESP32 접속용) — vLLM이 8000 점유하므로 8003
+      - "8002:8002"     # OTA/HTTP
+    volumes:
+      - ./data:/opt/xiaozhi-esp32-server/data
+      - ./config.yaml:/opt/xiaozhi-esp32-server/data/.config.yaml
+      - asr_models:/opt/xiaozhi-esp32-server/models
+    environment:
+      - TZ=Asia/Seoul
+
+volumes:
+  hf_cache:
+  asr_models:
+
+# ───────────────────────────────────────────────
+# 기동 후 검증
+# ───────────────────────────────────────────────
+# 1) vLLM 헬스체크:
+#    curl http://localhost:8000/v1/models
+#
+# 2) 비전 단독 테스트 (이미지 URL → 한국어 응답):
+#    curl http://localhost:8000/v1/chat/completions \
+#      -H "Content-Type: application/json" \
+#      -d '{
+#        "model": "qwen36",
+#        "messages": [{
+#          "role": "user",
+#          "content": [
+#            {"type": "image_url", "image_url": {"url": "<이미지 URL>"}},
+#            {"type": "text", "text": "이 이미지를 한국어로 한 문장으로 설명해."}
+#          ]
+#        }],
+#        "max_tokens": 200
+#      }'
+#
+# 3) ESP32 펌웨어 서버 주소: ws://<4090-IP>:8003/xiaozhi/v1/
