@@ -2,8 +2,6 @@
 # 사용법: 이 파일이 있는 deploy/ 폴더에서 `docker compose up -d`
 # 전제: 4090 PC / WSL2 / NVIDIA Container Toolkit 설치됨
 
-version: '3.8'
-
 services:
   # ───────────────────────────────────────────────
   # 1. vLLM — Qwen3.6-27B (LLM + 비전 통합 엔드포인트)

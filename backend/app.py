@@ -101,6 +101,46 @@ async def ask_ollama(transcript: str) -> str:
     return answer
 
 
+async def ask_openai_compatible(transcript: str) -> str:
+    payload = {
+        "model": env("VLLM_MODEL", "qwen36"),
+        "messages": [
+            {"role": "system", "content": env("SYSTEM_PROMPT")},
+            {"role": "user", "content": transcript},
+        ],
+        "temperature": float(env("LLM_TEMPERATURE", "0.7")),
+        "max_tokens": int(env("LLM_MAX_TOKENS", "256")),
+    }
+    base_url = env("VLLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
+    headers = {"Authorization": f"Bearer {env('VLLM_API_KEY', 'EMPTY')}"}
+    try:
+        async with httpx.AsyncClient(timeout=120) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"vLLM request failed: {exc}") from exc
+
+    data = response.json()
+    choices = data.get("choices", [])
+    answer = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+    if not answer:
+        raise HTTPException(status_code=502, detail="vLLM returned an empty answer")
+    return answer
+
+
+async def ask_llm(transcript: str) -> str:
+    provider = env("LLM_PROVIDER", "ollama").lower()
+    if provider == "ollama":
+        return await ask_ollama(transcript)
+    if provider in {"vllm", "openai"}:
+        return await ask_openai_compatible(transcript)
+    raise HTTPException(status_code=500, detail=f"Unsupported LLM_PROVIDER: {provider}")
+
+
 def synthesize_with_piper(text: str, key: str) -> str | None:
     piper_bin = env("PIPER_BIN")
     piper_model = env("PIPER_MODEL")
@@ -162,7 +202,7 @@ async def turn(request: Request) -> dict[str, str | None]:
         raise HTTPException(status_code=400, detail="PCM body must be 16-bit aligned")
 
     transcript = transcribe_pcm(pcm)
-    answer = await ask_ollama(transcript)
+    answer = await ask_llm(transcript)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
     audio_url = synthesize_with_piper(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
