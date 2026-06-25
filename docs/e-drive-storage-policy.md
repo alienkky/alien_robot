@@ -54,7 +54,7 @@ That file should point the swap file to E:
 
 ```ini
 [wsl2]
-memory=40GB
+memory=32GB
 swap=64GB
 swapFile=E:\\AlienRobot\\wsl-swap\\swap.vhdx
 pageReporting=false

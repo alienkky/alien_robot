@@ -31,14 +31,14 @@ GPU usage did increase to about 16GB, so the model started loading. The API is s
 For 48GB host RAM, start with:
 
 ```text
-WSL memory: 40GB
+WSL memory: 32GB
 WSL swap: 64GB
 Windows pagefile: system managed, or 64GB minimum if manually configured
 ```
 
 Why:
 
-- 40GB leaves about 8GB for Windows.
+- 32GB leaves enough memory for Windows and Docker Desktop while still raising the container limit above the previous 23.43GiB cap.
 - 64GB swap gives vLLM room during model load and compilation.
 - The RTX 4090 24GB VRAM is tight but usable with conservative vLLM settings.
 
@@ -54,7 +54,7 @@ Suggested content:
 
 ```ini
 [wsl2]
-memory=40GB
+memory=32GB
 swap=64GB
 swapFile=E:\\AlienRobot\\wsl-swap\\swap.vhdx
 pageReporting=false
