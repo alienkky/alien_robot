@@ -85,6 +85,12 @@ docker stats aa-vllm-qwen36 --no-stream
 curl.exe -sS http://localhost:8000/v1/models
 ```
 
+Or run the bundled smoke test:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/test-vllm.ps1
+```
+
 Do not start `xiaozhi-server` until `/v1/models` returns JSON.
 
 ## Expected Ready Signal
