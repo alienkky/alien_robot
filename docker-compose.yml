@@ -14,7 +14,7 @@ services:
       - CUDA_VISIBLE_DEVICES=0
       - HF_HUB_ENABLE_HF_TRANSFER=1
     volumes:
-      - hf_cache:/root/.cache/huggingface
+      - ${ALIEN_ROBOT_DATA_ROOT:-E:/AlienRobot}/hf_cache:/root/.cache/huggingface
     ports:
       - "8000:8000"
     command: >
@@ -50,15 +50,11 @@ services:
       - "8003:8000"     # WebSocket (ESP32 접속용) — vLLM이 8000 점유하므로 8003
       - "8002:8002"     # OTA/HTTP
     volumes:
-      - ./data:/opt/xiaozhi-esp32-server/data
+      - ${ALIEN_ROBOT_DATA_ROOT:-E:/AlienRobot}/data:/opt/xiaozhi-esp32-server/data
       - ./config.yaml:/opt/xiaozhi-esp32-server/data/.config.yaml
-      - asr_models:/opt/xiaozhi-esp32-server/models
+      - ${ALIEN_ROBOT_DATA_ROOT:-E:/AlienRobot}/asr_models:/opt/xiaozhi-esp32-server/models
     environment:
       - TZ=Asia/Seoul
-
-volumes:
-  hf_cache:
-  asr_models:
 
 # ───────────────────────────────────────────────
 # 기동 후 검증

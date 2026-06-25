@@ -3,6 +3,11 @@ $ErrorActionPreference = "Stop"
 
 $ModelUrl = "http://localhost:8000/v1/models"
 $ContainerName = "aa-vllm-qwen36"
+$DataRoot = if ($env:ALIEN_ROBOT_DATA_ROOT) { $env:ALIEN_ROBOT_DATA_ROOT } else { "E:/AlienRobot" }
+
+Write-Host "== Alien Robot data root =="
+Write-Host $DataRoot
+Write-Host ""
 
 Write-Host "== Docker container status =="
 docker ps --filter "name=$ContainerName" --format "table {{.Names}}`t{{.Status}}`t{{.Ports}}"

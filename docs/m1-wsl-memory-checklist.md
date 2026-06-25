@@ -56,6 +56,7 @@ Suggested content:
 [wsl2]
 memory=40GB
 swap=64GB
+swapFile=E:\\AlienRobot\\wsl-swap\\swap.vhdx
 pageReporting=false
 localhostForwarding=true
 ```
