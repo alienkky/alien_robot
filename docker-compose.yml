@@ -12,7 +12,7 @@ services:
     restart: unless-stopped
     environment:
       - CUDA_VISIBLE_DEVICES=0
-      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - HF_XET_HIGH_PERFORMANCE=1
     volumes:
       - ${ALIEN_ROBOT_DATA_ROOT:-E:/AlienRobot}/hf_cache:/root/.cache/huggingface
     ports:
@@ -26,7 +26,6 @@ services:
       --reasoning-parser qwen3
       --enable-auto-tool-choice
       --tool-call-parser qwen3_coder
-      --limit-mm-per-prompt image=2
       --host 0.0.0.0
       --port 8000
     shm_size: '2gb'
