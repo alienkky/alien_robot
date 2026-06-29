@@ -143,12 +143,29 @@ I2S mic -> ESP32-S3 -> HTTP PCM upload -> local AI server
 ### M0 — 음성 전용 프로토타입 ✅ (현재)
 - 상태: Ollama 기반 음성 대화, Serial 텍스트 응답까지.
 
-### M1 — vLLM 전환 (다음 시작점)
+### M1 — vLLM 전환 (진행 중)
 - [ ] 4090에 vLLM + Qwen3.6-27B INT4 컨테이너 기동
 - [ ] `curl`로 비전 단독 테스트 (이미지 URL → 한국어 응답 확인)
 - [ ] 기존 FastAPI 백엔드의 LLM 호출을 vLLM OpenAI 엔드포인트로 교체
 - **완료 기준:** 텍스트 대화가 vLLM 경로로 한국어 응답
 - **예상:** 반나절 (CUDA·양자화 호환 삽질 포함)
+
+#### M1 진행 로그 (2026-06-28, infra-engineer)
+기동 과정에서 만난 블로커와 처방을 순서대로 기록. docker-compose.yml에 누적 반영됨.
+
+1. **WSL 메모리 캡 (23.43GiB)** — `C:\Users\kimto\.wslconfig` `memory=24GB` → `32GB`로 상향. swap 64GB(E드라이브) 유지.
+2. **`/dev/shm` 부족 우려** — `docker-compose.yml` vLLM에 `shm_size: '2gb'` 추가.
+3. **`--limit-mm-per-prompt image=2` 파싱 에러** — vLLM 0.23.0이 `key=value` 대신 JSON 요구. 옵션 제거 (MVP는 기본값으로 충분).
+4. **deprecated 환경변수** — `HF_HUB_ENABLE_HF_TRANSFER` → `HF_XET_HIGH_PERFORMANCE=1`.
+5. **torch.dynamo 컴파일 충돌** — `--cpu-offload-gb 4`의 UVAOffloader가 `state_dict()` 추적 중 크래시
+   (`torch._dynamo.exc.Unsupported: setattr on OrderedDict`). 처방: `--enforce-eager` 추가
+   (CUDA graph/dynamo 비활성화, 속도 10~20% 손해 감수). vLLM 향후 버전에서 재검토.
+
+**확인된 사실:** 모델 로딩은 성공 (17.69GiB 다운로드 → 13.63GiB GPU 적재 + 4.02GB CPU 오프로드).
+실패 지점은 항상 모델 로딩 *이후* KV 캐시 프로파일링 단계였음.
+
+**남은 검증 (vLLM 정상 기동 확인 후):** `/v1/models` → 텍스트 curl → 비전 curl → `backend/.env` `LLM_PROVIDER=vllm` 연결.
+현재 환경: vLLM 0.23.0, 모델 `Lorbus/Qwen3.6-27B-int4-AutoRound`, 아키텍처 `Qwen3_5ForConditionalGeneration`.
 
 ### M2 — xiaozhi-server 이관 + 비전 활성화
 - [ ] xiaozhi-esp32-server를 docker-compose에 추가 (포트 8003)
