@@ -1,14 +1,16 @@
+// Phase 0 (HTTP): compiled by default. Phase 1 (WebSocket): add -DUSE_WEBSOCKET=1 to build_flags.
 #include <Arduino.h>
 #include <ArduinoJson.h>
-#include <HTTPClient.h>
 #include <WiFi.h>
 #include <driver/i2s.h>
 
-#include "config.h"
-
-#ifndef I2S_COMM_FORMAT_STAND_I2S
-#define I2S_COMM_FORMAT_STAND_I2S I2S_COMM_FORMAT_I2S
+#ifdef USE_WEBSOCKET
+#include <WebSocketsClient.h>
+#else
+#include <HTTPClient.h>
 #endif
+
+#include "config.h"
 
 namespace {
 constexpr int kSampleRate = 16000;
@@ -21,6 +23,10 @@ constexpr i2s_port_t kSpeakerPort = I2S_NUM_1;
 
 uint8_t *pcmBuffer = nullptr;
 size_t pcmBytes = 0;
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
 
 void setStatus(bool on) {
   digitalWrite(PIN_STATUS_LED, on ? HIGH : LOW);
@@ -88,7 +94,7 @@ void setupSpeaker() {
 }
 
 int16_t convertMicSample(int32_t sample) {
-  // INMP441-style mics commonly use the high 24 bits of a 32-bit frame.
+  // INMP441-style mics use the high 24 bits of a 32-bit I2S frame.
   int32_t shifted = sample >> 14;
   if (shifted > INT16_MAX) return INT16_MAX;
   if (shifted < INT16_MIN) return INT16_MIN;
@@ -118,6 +124,11 @@ void recordUntilRelease() {
   setStatus(false);
   Serial.printf("Recorded %u bytes\n", static_cast<unsigned>(pcmBytes));
 }
+
+// ---------------------------------------------------------------------------
+// Phase 0: HTTP path (original M0 implementation)
+// ---------------------------------------------------------------------------
+#ifndef USE_WEBSOCKET
 
 String postTurn() {
   HTTPClient http;
@@ -220,6 +231,155 @@ void handleTurn() {
   Serial.printf("AI: %s\n", answer);
   playWavFromUrl(audioUrl);
 }
+
+#else  // USE_WEBSOCKET
+
+// ---------------------------------------------------------------------------
+// Phase 1: WebSocket path (xiaozhi-esp32-server at ws://<IP>:8003/xiaozhi/v1/)
+// ---------------------------------------------------------------------------
+
+// States for the WebSocket turn state machine.
+enum class WsState {
+  kDisconnected,
+  kConnecting,
+  kHandshaking,   // sent hello, waiting for server hello
+  kIdle,          // ready for a new turn
+  kSendingAudio,  // sending PCM binary frame(s)
+  kWaitingReply,  // waiting for transcript/TTS from server
+  kReceivingAudio // streaming TTS audio from server to speaker
+};
+
+WebSocketsClient wsClient;
+WsState wsState = WsState::kDisconnected;
+// Server-side TTS sample rate comes from the hello handshake.
+uint32_t ttsSampleRate = 16000;
+
+// Play a raw PCM chunk (little-endian 16-bit signed) directly to I2S speaker.
+void playSpeakerChunk(const uint8_t *data, size_t len) {
+  size_t written = 0;
+  // i2s_write blocks until all bytes are queued in DMA.
+  i2s_write(kSpeakerPort, data, len, &written, portMAX_DELAY);
+}
+
+// Send the xiaozhi hello handshake. The server echoes back with its audio params.
+void sendWsHello() {
+  // xiaozhi protocol v3 hello: request raw PCM so no client-side codec needed.
+  const char *hello = "{\"type\":\"hello\",\"version\":3,\"transport\":\"websocket\","
+                      "\"audio_params\":{\"format\":\"pcm\",\"sample_rate\":16000,"
+                      "\"channels\":1,\"frame_duration\":0}}";
+  wsClient.sendTXT(hello);
+  Serial.println("WS: sent hello");
+  wsState = WsState::kHandshaking;
+}
+
+// Called by the WebSocketsClient library for each incoming event.
+void onWsEvent(WStype_t type, uint8_t *payload, size_t length) {
+  switch (type) {
+    case WStype_DISCONNECTED:
+      Serial.println("WS: disconnected");
+      wsState = WsState::kDisconnected;
+      break;
+
+    case WStype_CONNECTED:
+      Serial.printf("WS: connected to %s\n", (char *)payload);
+      sendWsHello();
+      break;
+
+    case WStype_TEXT: {
+      // JSON control frame from server.
+      JsonDocument doc;
+      if (deserializeJson(doc, payload, length) != DeserializationError::Ok) {
+        Serial.printf("WS: bad JSON: %.*s\n", (int)length, payload);
+        break;
+      }
+      const char *msgType = doc["type"] | "";
+
+      if (strcmp(msgType, "hello") == 0) {
+        // Server hello: extract TTS sample rate if provided.
+        uint32_t rate = doc["audio_params"]["sample_rate"] | 16000;
+        ttsSampleRate = rate;
+        if (ttsSampleRate != kSampleRate) {
+          // Speaker was set up at kSampleRate; reconfigure DMA sample rate.
+          i2s_set_clk(kSpeakerPort, ttsSampleRate, I2S_BITS_PER_SAMPLE_16BIT,
+                      I2S_CHANNEL_MONO);
+        }
+        Serial.printf("WS: server hello ok (TTS rate=%u)\n", ttsSampleRate);
+        wsState = WsState::kIdle;
+      } else if (strcmp(msgType, "stt") == 0) {
+        const char *text = doc["text"] | "";
+        Serial.printf("You: %s\n", text);
+      } else if (strcmp(msgType, "llm") == 0) {
+        const char *text = doc["text"] | "";
+        Serial.printf("AI: %s\n", text);
+        wsState = WsState::kReceivingAudio;
+        setStatus(true);
+      } else if (strcmp(msgType, "tts") == 0) {
+        // Some server builds send a final "tts" done marker.
+        if (doc["state"] == "stop") {
+          Serial.println("WS: TTS done");
+          setStatus(false);
+          wsState = WsState::kIdle;
+        }
+      } else if (strcmp(msgType, "error") == 0) {
+        Serial.printf("WS error: %s\n", doc["message"] | "unknown");
+        setStatus(false);
+        wsState = WsState::kIdle;
+      }
+      break;
+    }
+
+    case WStype_BIN:
+      // Binary frames are TTS PCM audio from the server.
+      if (wsState == WsState::kReceivingAudio || wsState == WsState::kWaitingReply) {
+        wsState = WsState::kReceivingAudio;
+        playSpeakerChunk(payload, length);
+      }
+      break;
+
+    case WStype_PING:
+      // Library auto-sends pong; nothing to do.
+      break;
+
+    case WStype_ERROR:
+      Serial.println("WS: socket error");
+      wsState = WsState::kDisconnected;
+      break;
+
+    default:
+      break;
+  }
+}
+
+// Connect (or reconnect) to the xiaozhi WebSocket server.
+void wsConnect() {
+  Serial.printf("WS: connecting to %s:%d%s\n", XIAOZHI_SERVER_HOST, XIAOZHI_SERVER_PORT,
+                XIAOZHI_SERVER_PATH);
+  wsClient.begin(XIAOZHI_SERVER_HOST, XIAOZHI_SERVER_PORT, XIAOZHI_SERVER_PATH);
+  wsClient.onEvent(onWsEvent);
+  // 5-second reconnect delay; library will retry automatically.
+  wsClient.setReconnectInterval(5000);
+  wsState = WsState::kConnecting;
+}
+
+void handleTurn() {
+  if (pcmBytes < kSampleRate) {
+    Serial.println("Recording too short; ignored.");
+    return;
+  }
+  if (wsState != WsState::kIdle) {
+    Serial.printf("WS: not ready (state=%d)\n", static_cast<int>(wsState));
+    return;
+  }
+
+  // Send the entire PCM buffer as a single binary WebSocket frame.
+  setStatus(true);
+  wsClient.sendBIN(pcmBuffer, pcmBytes);
+  Serial.printf("WS: sent %u bytes PCM\n", static_cast<unsigned>(pcmBytes));
+  wsState = WsState::kWaitingReply;
+  setStatus(false);
+}
+
+#endif  // USE_WEBSOCKET
 }  // namespace
 
 void setup() {
@@ -231,7 +391,7 @@ void setup() {
 
   pcmBuffer = static_cast<uint8_t *>(ps_malloc(kMaxPcmBytes));
   if (pcmBuffer == nullptr) {
-    Serial.println("Failed to allocate PSRAM buffer. Use an ESP32-S3 board with PSRAM.");
+    Serial.println("PSRAM alloc failed. Use ESP32-S3 board with PSRAM and OPI memory type.");
     while (true) {
       delay(1000);
     }
@@ -240,15 +400,44 @@ void setup() {
   connectWifi();
   setupMic();
   setupSpeaker();
-  Serial.println("Ready. Hold button to talk.");
+
+#ifdef USE_WEBSOCKET
+  wsConnect();
+  Serial.println("Ready (WebSocket mode). Hold button to talk.");
+#else
+  Serial.println("Ready (HTTP mode). Hold button to talk.");
+#endif
 }
 
 void loop() {
+#ifdef USE_WEBSOCKET
+  // WebSocket event loop must run every iteration.
+  wsClient.loop();
+#endif
+
   if (digitalRead(PIN_BUTTON) == LOW) {
     delay(30);
     if (digitalRead(PIN_BUTTON) == LOW) {
+#ifdef USE_WEBSOCKET
+      // Block WS events during recording — mic takes the CPU.
       recordUntilRelease();
       handleTurn();
+      // Drain WS events while waiting for reply.
+      unsigned long deadline = millis() + 30000UL;  // 30 s timeout
+      while (wsState == WsState::kWaitingReply || wsState == WsState::kReceivingAudio) {
+        wsClient.loop();
+        if (millis() > deadline) {
+          Serial.println("WS: reply timeout");
+          setStatus(false);
+          wsState = WsState::kIdle;
+          break;
+        }
+        delay(1);
+      }
+#else
+      recordUntilRelease();
+      handleTurn();
+#endif
       Serial.println("Ready. Hold button to talk.");
     }
   }
