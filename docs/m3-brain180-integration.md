@@ -152,9 +152,20 @@ uvicorn app:app --host 0.0.0.0 --port 8787
 # 3) ESP32(M0 펌웨어): config.h 의 서버 IP를 게이트웨이(4090:8787)로. POST /api/turn 그대로.
 ```
 
-### 남은 일
-- **펌웨어 카메라 경로:** Waveshare 3.5B(ES8311+OV5640)로 M0 흐름 포팅 + `/api/see` 멀티파트
-  전송 = **실물 보드 확보 후** (핀맵 `m3-board-bringup.md` 유효). 그전엔 M0 DIY 보드가 음성 단말 스탠드인.
+### 펌웨어 (2026-06-30 2차 — 코드 완료 + 빌드 검증)
+Waveshare 3.5B용 펌웨어를 **우리 PlatformIO 코드로** 작성하고 `pio run` 빌드 통과
+(xiaozhi ESP-IDF 대신 독사 펌웨어; xiaozhi는 레퍼런스만).
+- `firmware/platformio.ini`: 새 env `waveshare-s3-touch-lcd-35b` (N16R8 octal PSRAM,
+  16MB). M0 env(`esp32-s3-devkitc-1`)는 `build_src_filter`로 분리해 **그대로 보존**(빌드 통과 확인).
+- `firmware/src/main_waveshare.cpp`: BOOT 푸시투토크 → ES8311 마이크 녹음 + OV5640 JPEG
+  캡처 → 멀티파트 `POST /api/see`(audio+image) → 응답 재생(ES8311 스피커).
+- `firmware/src/es8311.{h,cpp}`: ES8311 코덱 I2C 드라이버. `firmware/include/config_waveshare.h.example`: 핀맵.
+- **빌드: 두 env 모두 SUCCESS** (RAM 15.7% / Flash 30.5%). esp_camera·I2S·멀티파트 전부 링크 OK.
+- ⚠️ **빌드 통과 ≠ 실기 동작.** ES8311 레지스터 init·I2S 클럭은 **실보드 검증 필요**(드라이버에 UNVERIFIED 배너).
+  카메라 핀은 보드 프로파일과 일치. **플래싱/시리얼/오디오 튜닝 = 실보드 확보 후.**
+
+### 남은 일 (실물/4090 의존 — 이번 범위 외)
+- 실보드 플래싱·시리얼 검증·ES8311 오디오 튜닝.
 - **프라이빗 전환:** brain180 `AI_PROVIDER`를 4090 vLLM/Qwen3.6로(인프라).
 - 라이브 STT/LLM/TTS 실호출은 4090(모델·키·DB 필요). 본 작업은 빌드·종단 스텁 통합까지 검증.
 

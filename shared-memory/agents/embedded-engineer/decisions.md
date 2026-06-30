@@ -15,3 +15,8 @@
 - 설계: ESP32는 음성/카메라 I/O만, 4090 robot-gateway가 STT/TTS + brain180 /api/tutor/chat
   (쿠키 인증·레슨세션·카메라 base64) 전담. 단말↔게이트웨이는 M0 turn 계약 재사용→WS.
 - 보류(결정 대기): vLLM/Qwen3.6 거취(클라우드 LLM과 프라이버시 충돌), 레슨 종속 해소법, 인증 방식.
+
+## 2026-06-30 (3차) · 펌웨어 = 우리 PlatformIO 코드 (xiaozhi ESP-IDF 폐기)
+- 결정: M3 펌웨어를 xiaozhi ESP-IDF 빌드 대신 **우리 PlatformIO Arduino 코드**로 작성.
+  근거: 독사 게이트웨이(/api/see)와 직접 통신, M0 코드/툴체인 재사용, pio run 빌드검증 가능.
+- M0 env 보존(build_src_filter 분리). 실보드 플래싱·ES8311 오디오 튜닝만 실물 의존으로 남김.

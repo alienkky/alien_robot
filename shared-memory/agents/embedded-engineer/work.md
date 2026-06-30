@@ -33,3 +33,12 @@
   (M0 펌웨어 무수정). /api/see(카메라 멀티파트)·/api/reset. faster-whisper+Piper 재사용.
   스텁 종단 통합테스트 PASS. 문서: m3-brain180-integration.md §4.5, protocol.md.
 - 남음: 실보드 카메라 펌웨어 포팅, brain180 AI_PROVIDER→vLLM(프라이빗), 4090 라이브 실호출.
+
+## 2026-06-30 (4차) · ALI-21 Waveshare 펌웨어 (실물의존 낮은 다음 작업)
+- 기영님: 실물의존 빼고 실물의존성 낮은 다음 작업 → 펌웨어 작성+pio 빌드검증(플래싱만 실물).
+- 우리 PlatformIO 독사 펌웨어(xiaozhi ESP-IDF 대신): env waveshare-s3-touch-lcd-35b.
+  main_waveshare.cpp(푸시투토크→ES8311녹음+OV5640 JPEG→멀티파트 /api/see→재생),
+  es8311.{h,cpp} 코덱 드라이버, config_waveshare.h.example 핀맵.
+- platformio.ini: M0 env는 build_src_filter로 분리 보존. 두 env 모두 pio run SUCCESS
+  (RAM15.7%/Flash30.5%). esp_camera/I2S/멀티파트 링크 OK.
+- 미검증(실보드): ES8311 레지스터 init·I2S 클럭(드라이버 UNVERIFIED 배너). 카메라 핀은 보드 프로파일 일치.
