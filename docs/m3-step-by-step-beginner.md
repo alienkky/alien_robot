@@ -140,7 +140,13 @@ curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@sil
 ```
 ipconfig
 ```
-- `IPv4 주소 . . . : 192.168.x.x` 를 찾아 **메모.** (보드가 이 주소로 게이트웨이를 부름.)
+- 여러 개가 나오면 **"이더넷 어댑터 이더넷"(또는 Wi-Fi 어댑터)의 IPv4** 하나만 씀. 나머지는 제외:
+  - **Tailscale (100.x)** = VPN → ✗
+  - **vEthernet (Default Switch / WSL) (172.x)** = 가상 네트워크 → ✗
+  - **Bluetooth** = ✗
+- ⚠️ **보드(ESP32)와 이 PC가 같은 공유기(같은 Wi-Fi)에 있어야** 보드가 이 IP로 붙음.
+  - 보드 붙일 Wi-Fi에 스마트폰을 연결해 폰 IP 대역을 보면 같은 망인지 알 수 있음(예: 폰이 `192.168.0.x`인데 PC가 `220.x`면 서로 다른 망 → PC를 그 공유기에 유선으로 연결하고 다시 ipconfig).
+- 찾은 IPv4를 **메모.** (보드가 이 주소로 게이트웨이를 부름.)
 - **윈도우 방화벽**이 물어보면 "허용". (8787 포트가 막히면 보드가 못 붙음.)
 
 ---
