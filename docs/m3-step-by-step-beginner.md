@@ -49,9 +49,14 @@
 - 없으면 **Generate Domain** 클릭. 이 주소(앞에 `https://` 붙여서)를 **메모장에 적어둠.**
 
 ### B-7. 잘 떴는지 확인
-- 같은 줄에 토큰만 끼워 브라우저 주소창 말고 **터미널**에서(또는 아무 PC):
+- ⚠️ **PowerShell 주의:** 그냥 `curl`은 PowerShell에서 다른 명령(Invoke-WebRequest)의 별칭이라
+  `-H` 옵션을 못 받음. 반드시 **`curl.exe`** 로 쓰고, **`토큰값`은 B-1에서 만든 진짜 토큰**으로 바꿀 것.
   ```
-  curl -H "Authorization: Bearer 토큰값" https://여기에-railway-주소/api/robot/health
+  curl.exe -H "Authorization: Bearer 진짜토큰값" https://여기에-railway-주소/api/robot/health
+  ```
+  PowerShell식이 편하면 이렇게도 됨:
+  ```
+  Invoke-RestMethod "https://여기에-railway-주소/api/robot/health" -Headers @{ Authorization = "Bearer 진짜토큰값" }
   ```
 - **`"status":"ok"` 가 보이면 브레인 준비 끝.**
   - `text_provider` 가 채워져 있어야 함(대화 가능). `vision_provider:"openai"` 면 카메라도 가능.
@@ -121,8 +126,9 @@ uvicorn app:app --host 0.0.0.0 --port 8787
 cd $HOME\Desktop\alien_robot\backend
 $bytes = New-Object byte[] 32000
 [IO.File]::WriteAllBytes("$PWD\silence.pcm", $bytes)
-curl.exe -Method POST -InFile .\silence.pcm -H "Content-Type: application/octet-stream" http://127.0.0.1:8787/api/turn
+curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@silence.pcm" http://127.0.0.1:8787/api/turn
 ```
+(여기도 `curl` 아니라 **`curl.exe`**. `-X POST`/`--data-binary` 가 진짜 curl 문법.)
 - 응답에 **`"answer":"...한국어 문장..."`** 이 오면 **브레인↔게이트웨이 연결 성공!**
   - `502 Brain180 ...` → A-5의 주소/토큰이 B와 다름. `upstream_error` → Railway의 LLM 키 확인.
 - 성공했으면 `notepad .env` 다시 열어 **`MOCK_TRANSCRIPT` 줄을 지우고 저장**, A-6 창에서 Ctrl+C 후 다시 `uvicorn ...` 실행(이제 진짜 마이크 음성으로 동작).

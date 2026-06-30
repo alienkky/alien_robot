@@ -28,7 +28,8 @@
    메인에 머지하거나 Railway가 이 브랜치를 빌드하도록 지정. 재배포.
 3. 확인(아무 PC에서):
    ```powershell
-   curl -H "Authorization: Bearer <토큰>" https://<your-app>.up.railway.app/api/robot/health
+   # PowerShell에서는 반드시 curl.exe (그냥 curl은 Invoke-WebRequest 별칭이라 -H 안 먹음)
+   curl.exe -H "Authorization: Bearer <토큰>" https://<your-app>.up.railway.app/api/robot/health
    ```
    기대: `{"data":{"status":"ok","text_provider":"kimi","vision_provider":"openai"},...}`
    - `vision_provider":"none"` 이면 카메라 설명이 안 됨 → 비전 키 추가.
@@ -84,11 +85,11 @@ uvicorn app:app --host 0.0.0.0 --port 8787
 ### 보드 없이 먼저 브레인 루프 검증 (중요 — 펌웨어 굽기 전에)
 STT를 건너뛰고 텍스트로 전체 경로를 때려본다. `.env`에 임시로 `MOCK_TRANSCRIPT=안녕, 너 누구야?` 추가 후 재시작, 그 다음:
 ```powershell
-curl http://127.0.0.1:8787/health
+curl.exe http://127.0.0.1:8787/health
 # 더미 PCM(1초 무음=32000바이트)로 /api/turn 호출:
 $bytes = New-Object byte[] 32000
 [IO.File]::WriteAllBytes("$PWD\silence.pcm", $bytes)
-curl -Method POST -InFile .\silence.pcm -ContentType application/octet-stream http://127.0.0.1:8787/api/turn
+curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@silence.pcm" http://127.0.0.1:8787/api/turn
 ```
 기대 응답: `{"transcript":"안녕, 너 누구야?","answer":"<로봇 한국어 답>","audio_url":null}`
 - `answer`에 한국어가 오면 **브레인 연동 OK.** 검증 끝나면 `MOCK_TRANSCRIPT` 다시 비우기.
