@@ -105,14 +105,17 @@ Copy-Item config.example.env .env
 ```
 notepad .env
 ```
-메모장이 뜨면 아래 4줄을 찾아(또는 추가해) 채우고 저장:
+메모장이 뜨면 아래 4줄을 채우고 저장:
 ```
 LLM_PROVIDER=brain180
 BRAIN180_BASE_URL=https://여기에-B6에서-적은-railway-주소
 BRAIN180_DEVICE_TOKEN=여기에-B1에서-만든-토큰
 MOCK_TRANSCRIPT=안녕, 너 누구야?
 ```
+- ⚠️ **`LLM_PROVIDER` 는 파일에 이미 `LLM_PROVIDER=ollama` 로 들어있음. 그 줄을 `brain180`으로
+  "바꿔야" 함**(새 줄을 또 추가하지 말 것). ollama 그대로면 A-7에서 `Ollama ... 404` 에러가 남.
 - 마지막 `MOCK_TRANSCRIPT` 는 **보드 없이 글자로 먼저 시험**하려고 임시로 넣는 것(나중에 지움).
+- 저장 후 확인(선택): `Get-Content .env | Select-String "LLM_PROVIDER|BRAIN180"` → `LLM_PROVIDER=brain180` 한 줄만 보이면 정상.
 
 ### A-6. 게이트웨이 켜기
 ```
@@ -198,6 +201,7 @@ ipconfig
 | `Activate.ps1` 빨간 보안 에러 | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (Y) 후 다시 |
 | `git`/`python` "인식할 수 없는" | 미설치 → A-2대로 설치 후 창 다시 열기 |
 | `[Errno 10048] ... bind ... 8787` | 8787 포트가 이미 점유됨(이전 uvicorn 창이 안 닫힘/중복 실행). 이전 창에서 Ctrl+C 하거나: `netstat -ano \| findstr :8787` 로 맨 끝 PID 확인 → `taskkill /PID <PID> /F` → 다시 uvicorn |
+| 글자 테스트가 `Ollama ... 404` | `.env`의 `LLM_PROVIDER`가 아직 `ollama`임. **`brain180`으로 바꾸고 uvicorn 재시작**(.env 수정은 재시작해야 반영) |
 | 글자 테스트가 `502` | A-5 주소/토큰이 B의 값과 똑같은지 |
 | 답이 "이미지를 볼 수 없습니다" | Railway에 `OPENAI_API_KEY` 추가(B-5) |
 | 업로드시 보드 안 잡힘 | BOOT 누른 채 RESET 후 다시 Upload. USB 케이블 교체 |
