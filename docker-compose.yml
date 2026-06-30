@@ -48,8 +48,10 @@ services:
     depends_on:
       - vllm
     ports:
-      - "8003:8000"     # WebSocket (ESP32 접속용) — vLLM이 8000 점유하므로 8003
-      - "8002:8002"     # OTA/HTTP
+      # 컨테이너 내부: WebSocket=8000, HTTP(OTA/비전 MCP)=8003.
+      # vLLM이 host 8000을 점유하므로 WS는 host 8003으로 노출.
+      - "8003:8000"     # WebSocket (ESP32 접속: ws://<4090-IP>:8003/xiaozhi/v1/)
+      - "8002:8003"     # OTA/HTTP (http://<4090-IP>:8002/xiaozhi/ota/, /mcp/vision/explain)
     volumes:
       - ${ALIEN_ROBOT_DATA_ROOT:-E:/AlienRobot}/data:/opt/xiaozhi-esp32-server/data
       - ./config.yaml:/opt/xiaozhi-esp32-server/data/.config.yaml
