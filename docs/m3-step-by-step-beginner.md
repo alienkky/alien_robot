@@ -18,6 +18,31 @@
 
 ---
 
+## 0.5 재부팅/재시작 후 — 이미 한 번 설치했다면 이것만 (3분)
+
+처음 설치(코드 받기·venv·pip·.env 작성)는 **재부팅해도 안 사라집니다.** 다시 설치하지 말 것.
+brain180은 Railway(클라우드)라 PC와 무관하게 계속 떠 있음. **게이트웨이만 다시 켜면 됩니다.**
+
+```powershell
+# 1) 게이트웨이 켜기
+cd $HOME\Desktop\alien_robot\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn app:app --host 0.0.0.0 --port 8787
+#   "Application startup complete." 뜨고 그 아래 빨간 ERROR 없으면 OK. 이 창은 켜둔다.
+```
+```powershell
+# 2) (새 PowerShell 창) brain180 살아있는지 + 게이트웨이 글자 테스트
+curl.exe -H "Authorization: Bearer 진짜토큰" https://brain180-production.up.railway.app/api/robot/health
+cd $HOME\Desktop\alien_robot\backend
+$bytes = New-Object byte[] 32000
+[IO.File]::WriteAllBytes("$PWD\silence.pcm", $bytes)
+curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@silence.pcm" http://127.0.0.1:8787/api/turn
+```
+- health가 `"status":"ok"`, 글자테스트가 `"answer":"...한국어..."` 면 정상 가동.
+- 보드까지 쓸 거면 그다음 C(펌웨어)로. (설치가 처음이면 아래 B부터.)
+
+---
+
 ## B. Railway 하는 방법 (브라우저, 먼저 함)
 
 > Railway = 우리 브레인(brain180)을 인터넷에 띄워 두는 곳. 보드/게이트웨이가 여기로 질문을 보냄.
