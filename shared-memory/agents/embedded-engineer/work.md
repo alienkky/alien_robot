@@ -54,3 +54,11 @@
 - docs/m3-step-by-step-beginner.md: 전체그림 표 + B(Railway 클릭) + A(PowerShell 게이트웨이, 보드없이 글자테스트) + C(VS Code+PlatformIO 버튼) + 막힘 표.
 - alien_robot 기본브랜치=ali-112-...(main 아님). 코드는 agent/embedded-engineer/4d2c69d9 → clone -b 로 안내.
 - brain180 Railway 배포 브랜치 = feat/robot-bridge-ali21.
+
+## 2026-06-30 (7차) · 게이트웨이 EdgeTTS(답 음성화) 추가
+- 게이트웨이 글자 대화 라이브 OK 후 기영님 "답 음성으로 듣기".
+- backend/app.py: synthesize_with_edge_tts(EdgeTTS→mp3→imageio-ffmpeg로 16k mono WAV) +
+  synthesize_tts 디스패처(TTS_ENGINE=edge|piper|none). /api/turn·/api/see가 await 호출.
+- requirements: edge-tts>=7.0.0(6.x는 MS 403), imageio-ffmpeg(ffmpeg 번들, 별도설치 X).
+- config.example.env: TTS_ENGINE/EDGE_TTS_VOICE(ko-KR-InJoonNeural).
+- 검증: 실제 합성 OK(16kHz mono WAV 5.45s). 사용자: git pull + pip install + TTS_ENGINE=edge + 재시작.

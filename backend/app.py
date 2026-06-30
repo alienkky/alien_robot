@@ -239,6 +239,55 @@ def synthesize_with_piper(text: str, key: str) -> str | None:
     return f"/audio/{output_path.name}"
 
 
+async def synthesize_with_edge_tts(text: str, key: str) -> str | None:
+    """EdgeTTS(클라우드, 무료, 키 불필요) → 16kHz mono WAV.
+
+    edge-tts는 mp3를 내므로 imageio-ffmpeg가 번들한 ffmpeg로 장치 호환 WAV로
+    변환한다(ffmpeg 별도 설치 불필요). 보드 스피커·PC 재생 둘 다 호환.
+    필요 패키지: edge-tts, imageio-ffmpeg (requirements.txt).
+    """
+    import edge_tts  # lazy: 미설치 환경에서도 앱이 뜨도록
+    import imageio_ffmpeg
+
+    voice = env("EDGE_TTS_VOICE", "ko-KR-InJoonNeural")
+    mp3_path = ARTIFACT_DIR / f"{key}.mp3"
+    wav_path = ARTIFACT_DIR / f"{key}.wav"
+
+    try:
+        await edge_tts.Communicate(text, voice).save(str(mp3_path))
+    except Exception as exc:  # noqa: BLE001 — 네트워크/보이스 오류를 502로 표면화
+        raise HTTPException(status_code=502, detail=f"EdgeTTS failed: {exc}") from exc
+
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    command = [
+        ffmpeg, "-y", "-i", str(mp3_path),
+        "-ar", str(SAMPLE_RATE), "-ac", "1", "-f", "wav", str(wav_path),
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, timeout=60)
+    except (subprocess.SubprocessError, OSError) as exc:
+        raise HTTPException(status_code=500, detail=f"ffmpeg convert failed: {exc}") from exc
+    finally:
+        mp3_path.unlink(missing_ok=True)
+
+    return f"/audio/{wav_path.name}"
+
+
+async def synthesize_tts(text: str, key: str) -> str | None:
+    """TTS 디스패처. TTS_ENGINE=edge|piper|none.
+
+    미지정 시: Piper가 설정돼 있으면 piper, 아니면 none(텍스트만, audio_url=null).
+    """
+    engine = env("TTS_ENGINE").lower()
+    if not engine:
+        engine = "piper" if (env("PIPER_BIN") and env("PIPER_MODEL")) else "none"
+    if engine == "edge":
+        return await synthesize_with_edge_tts(text, key)
+    if engine == "piper":
+        return synthesize_with_piper(text, key)
+    return None
+
+
 def normalize_wav_for_device(path: Path) -> None:
     source_rate, data = wavfile.read(path)
     if data.ndim > 1:
@@ -274,7 +323,7 @@ async def turn(request: Request) -> dict[str, str | None]:
     transcript = transcribe_pcm(pcm)
     answer = await ask_llm(transcript)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
-    audio_url = synthesize_with_piper(answer, key)
+    audio_url = await synthesize_tts(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
 
 
@@ -311,7 +360,7 @@ async def see(
 
     answer = await ask_brain180(transcript, image_b64)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
-    audio_url = synthesize_with_piper(answer, key)
+    audio_url = await synthesize_tts(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
 
 
