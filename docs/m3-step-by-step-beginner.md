@@ -197,6 +197,7 @@ ipconfig
 |---|---|
 | `Activate.ps1` 빨간 보안 에러 | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (Y) 후 다시 |
 | `git`/`python` "인식할 수 없는" | 미설치 → A-2대로 설치 후 창 다시 열기 |
+| `[Errno 10048] ... bind ... 8787` | 8787 포트가 이미 점유됨(이전 uvicorn 창이 안 닫힘/중복 실행). 이전 창에서 Ctrl+C 하거나: `netstat -ano \| findstr :8787` 로 맨 끝 PID 확인 → `taskkill /PID <PID> /F` → 다시 uvicorn |
 | 글자 테스트가 `502` | A-5 주소/토큰이 B의 값과 똑같은지 |
 | 답이 "이미지를 볼 수 없습니다" | Railway에 `OPENAI_API_KEY` 추가(B-5) |
 | 업로드시 보드 안 잡힘 | BOOT 누른 채 RESET 후 다시 Upload. USB 케이블 교체 |
