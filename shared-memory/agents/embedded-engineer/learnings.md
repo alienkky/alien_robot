@@ -10,3 +10,9 @@
 - 이 보드 오디오는 ES8311 코덱 — 우리 M0 DIY(INMP441/MAX98357A I2S 직결)와 하드웨어가 다름.
   → M0 `firmware/main.cpp` 는 이 보드에 안 쓰임. 별도 코드베이스(xiaozhi)로 빌드.
 - 보드 contents/파일 목록·config 원문은 GitHub API(api.github.com/.../contents/...) + raw URL로 직접 확인 가능.
+
+## 2026-06-30 · Brain180 튜터 API
+- 튜터 = Express POST /api/tutor/chat. 인증=Lucia 쿠키 b180_session(승인 student). 디바이스 API-key 없음.
+- 본문 {session_id, lesson_id, message, canvas_image_base64?}. 선행: /api/auth/login + /api/practice/sessions.
+- canvas_image_base64(PNG)로 비전 입력 가능 → 카메라 프레임을 여기에 넣으면 튜터가 봄(별도 비전모델 불필요).
+- LLM=Kimi(기본)/Anthropic, 비전=OpenAI gpt-4.1-mini/Anthropic. 전부 클라우드. STT/TTS/WS 미제공.

@@ -9,3 +9,9 @@
   ("빌드 통과 ≠ 실기 동작" 정체성 규칙 준수.)
 - 권고(인프라 판단 대기): xiaozhi 공식 펌웨어가 WebSocket+MCP+비전 제공 →
   **ALI-20(커스텀 WebSocket) cancel/축소 후보.** shared-memory 메시지로 infra에 전달.
+
+## 2026-06-30 (2차) · 브레인 = Brain180 AI 튜터 (xiaozhi 레퍼런스만)
+- 결정(기영님): 로봇 브레인을 brain180의 AI 튜터로. xiaozhi 구성 폐기 → 레퍼런스만.
+- 설계: ESP32는 음성/카메라 I/O만, 4090 robot-gateway가 STT/TTS + brain180 /api/tutor/chat
+  (쿠키 인증·레슨세션·카메라 base64) 전담. 단말↔게이트웨이는 M0 turn 계약 재사용→WS.
+- 보류(결정 대기): vLLM/Qwen3.6 거취(클라우드 LLM과 프라이버시 충돌), 레슨 종속 해소법, 인증 방식.

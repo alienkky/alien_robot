@@ -13,3 +13,13 @@
   - `docs/HANDOFF.md` — M3 체크박스 갱신 (타깃 변경).
   - `shared-memory/messages/...-to-infra-engineer-ali20-vision-config.md`.
 - 미완(장비 의존): 실제 `idf.py build` 컴파일, USB 플래싱, 시리얼 검증 → 기영님.
+
+## 2026-06-30 (2차) · ALI-21 방향 전환 — Brain180 AI 튜터 연동
+- 기영님 지시: xiaozhi 폐기(레퍼런스만), 독사 자체 구현 + Brain180 AI 튜터를 브레인으로.
+- brain180(github.com/alienkky/brain180) 조사: React+Express+PG+Lucia 웹앱. 튜터 =
+  POST /api/tutor/chat (쿠키 인증, lesson/session 종속, message=텍스트, canvas_image_base64=비전).
+  LLM=Kimi/Anthropic, 비전=OpenAI/Anthropic(클라우드). STT/TTS/WS 없음.
+- 산출: docs/m3-brain180-integration.md (독사 아키텍처 + brain180 계약 + 결정사항).
+  ESP32=단순 단말, 4090 robot-gateway가 STT/TTS+brain180 호출 흡수.
+- 미해결(기영님): vLLM 거취/프라이버시, 로봇 레슨 vs 디바이스 엔드포인트, 디바이스 인증,
+  brain180 로컬 vs Railway, STT/TTS 자체구현.
