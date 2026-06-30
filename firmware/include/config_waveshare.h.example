@@ -1,0 +1,51 @@
+#pragma once
+// ─────────────────────────────────────────────────────────────────────
+// Board profile: Waveshare ESP32-S3-Touch-LCD-3.5B (N16R8, AXS15231B QSPI)
+// Used by the `waveshare-s3-touch-lcd-3.5b` PlatformIO env (main_waveshare.cpp).
+// Pin values verified against the xiaozhi-esp32 board profile config.h
+// (main/boards/waveshare/esp32-s3-touch-lcd-3.5b). See docs/m3-board-bringup.md.
+//
+// Copy to config_waveshare.h and fill Wi-Fi + gateway URL. Do NOT commit secrets.
+// ─────────────────────────────────────────────────────────────────────
+
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// 4090 robot-gateway (backend/app.py, LLM_PROVIDER=brain180). Vision turn path.
+// Example: "http://192.168.0.20:8787"
+#define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
+
+// Push-to-talk button. BOOT(GPIO0) is the only free button on this board.
+#define PIN_BUTTON 0
+
+// ── Audio: ES8311 codec (I2S data + I2C control) ──────────────────────
+#define ES8311_I2C_ADDR   0x18      // ES8311_CODEC_DEFAULT_ADDR
+#define ES8311_I2C_SDA    8
+#define ES8311_I2C_SCL    7
+#define ES8311_I2C_FREQ   100000
+
+#define I2S_MCLK_PIN      44
+#define I2S_WS_PIN        15
+#define I2S_BCLK_PIN      13
+#define I2S_DIN_PIN       14        // mic  (ES8311 ADC → ESP)
+#define I2S_DOUT_PIN      16        // spk  (ESP → ES8311 DAC)
+
+// ── Camera: OV5640 / OV2640 DVP 8-bit ─────────────────────────────────
+// SCCB (SIOD/SIOC) shares the codec I2C bus (SDA=8, SCL=7) → set to -1 here so
+// the camera driver reuses that bus instead of driving its own pins.
+#define CAM_PIN_PWDN   -1
+#define CAM_PIN_RESET  -1
+#define CAM_PIN_XCLK   38
+#define CAM_PIN_SIOD   -1
+#define CAM_PIN_SIOC   -1
+#define CAM_PIN_VSYNC  17
+#define CAM_PIN_HREF   18
+#define CAM_PIN_PCLK   41
+#define CAM_PIN_D0     45
+#define CAM_PIN_D1     47
+#define CAM_PIN_D2     48
+#define CAM_PIN_D3     46
+#define CAM_PIN_D4     42
+#define CAM_PIN_D5     40
+#define CAM_PIN_D6     39
+#define CAM_PIN_D7     21

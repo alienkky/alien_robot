@@ -1,17 +1,19 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 import subprocess
 import tempfile
 import wave
+from collections import deque
 from pathlib import Path
 from typing import Any
 
 import httpx
 import numpy as np
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from scipy import signal
 from scipy.io import wavfile
@@ -150,8 +152,70 @@ async def ask_openai_compatible(transcript: str) -> str:
     return answer
 
 
-async def ask_llm(transcript: str) -> str:
+# ── Brain180 robot bridge (ALI-21) ──────────────────────────────────
+# The brain is the Brain180 program's AI tutor, reached over its device route
+# POST /api/robot/chat (bearer-token, stateless). This gateway owns the short
+# conversation memory and forwards it as `history` each turn, plus an optional
+# camera frame (base64 JPEG) for vision. Swapping Brain180's own LLM from Kimi
+# to the local 4090 vLLM (Qwen3.6) is a Brain180-side env change — invisible here.
+
+# Rolling dialogue memory for the single desk robot. Each entry is a
+# {"role": "user"|"assistant", "content": str} dict in Brain180's history shape.
+_robot_history: deque[dict[str, str]] = deque(
+    maxlen=max(2, int(env("ROBOT_HISTORY_TURNS", "6")) * 2)
+)
+
+
+def reset_robot_history() -> None:
+    _robot_history.clear()
+
+
+async def ask_brain180(transcript: str, image_b64: str | None = None) -> str:
+    base_url = env("BRAIN180_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
+    token = env("BRAIN180_DEVICE_TOKEN")
+    if not token:
+        raise HTTPException(
+            status_code=500,
+            detail="BRAIN180_DEVICE_TOKEN not configured (set it to the server's ROBOT_DEVICE_TOKEN)",
+        )
+
+    payload: dict[str, Any] = {
+        "message": transcript,
+        "history": list(_robot_history),
+    }
+    if image_b64:
+        payload["image_base64"] = image_b64
+
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = float(env("BRAIN180_TIMEOUT", "120"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/api/robot/chat", json=payload, headers=headers
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        # Surface Brain180's structured error code (e.g. upstream_error) to logs.
+        detail = exc.response.text[:300] if exc.response is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"Brain180 request failed: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Brain180 unreachable: {exc}") from exc
+
+    data = response.json()
+    answer = (data.get("data", {}) or {}).get("text", "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="Brain180 returned an empty answer")
+
+    # Commit this turn to memory only after a successful answer.
+    _robot_history.append({"role": "user", "content": transcript})
+    _robot_history.append({"role": "assistant", "content": answer})
+    return answer
+
+
+async def ask_llm(transcript: str, image_b64: str | None = None) -> str:
     provider = env("LLM_PROVIDER", "ollama").lower()
+    if provider == "brain180":
+        return await ask_brain180(transcript, image_b64)
     if provider == "ollama":
         return await ask_ollama(transcript)
     if provider in {"vllm", "openai"}:
@@ -225,6 +289,50 @@ async def turn(request: Request) -> dict[str, str | None]:
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
     audio_url = synthesize_with_piper(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
+
+
+@app.post("/api/see")
+async def see(
+    audio: UploadFile = File(..., description="raw 16kHz mono s16le PCM"),
+    image: UploadFile | None = File(None, description="JPEG camera frame"),
+    text: str | None = Form(None, description="optional text instead of audio STT"),
+) -> dict[str, str | None]:
+    """Vision turn for the camera firmware: PCM (or text) + a JPEG frame.
+
+    Mirrors /api/turn but multipart, so the ESP32-S3 (Waveshare 3.5B + OV5640)
+    can attach what the camera sees. Requires LLM_PROVIDER=brain180 (only the
+    Brain180 bridge forwards images to a vision model).
+    """
+    if env("LLM_PROVIDER", "ollama").lower() != "brain180":
+        raise HTTPException(status_code=400, detail="/api/see requires LLM_PROVIDER=brain180")
+
+    if text and text.strip():
+        transcript = text.strip()
+    else:
+        pcm = await audio.read()
+        if len(pcm) < SAMPLE_RATE * SAMPLE_WIDTH_BYTES // 2:
+            raise HTTPException(status_code=400, detail="PCM body is too short")
+        if len(pcm) % SAMPLE_WIDTH_BYTES != 0:
+            raise HTTPException(status_code=400, detail="PCM body must be 16-bit aligned")
+        transcript = transcribe_pcm(pcm)
+
+    image_b64: str | None = None
+    if image is not None:
+        raw = await image.read()
+        if raw:
+            image_b64 = base64.b64encode(raw).decode("ascii")
+
+    answer = await ask_brain180(transcript, image_b64)
+    key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
+    audio_url = synthesize_with_piper(answer, key)
+    return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
+
+
+@app.post("/api/reset")
+async def reset() -> dict[str, str]:
+    """Clear the robot's rolling conversation memory (new dialogue)."""
+    reset_robot_history()
+    return {"status": "ok"}
 
 
 @app.get("/audio/{filename}")

@@ -159,13 +159,19 @@ I2S mic -> ESP32-S3 -> HTTP PCM upload -> local AI server
 - **상세 절차:** `docs/m2-xiaozhi-runbook.md`
 - **주의(xiaozhi 비전 quirk):** 이미지 `VLLMProvider.response()`가 `(请使用中文回复)`를 하드코딩 → 비전 raw 출력은 중국어. 한국어는 대화 LLM(페르소나 프롬프트)이 비전 결과를 대화에 엮을 때 산출. 이미지 자체 교체 없이는 변경 불가 → 페르소나/통합 단계 검토.
 
-### M3 — StackChan 하드웨어 + 카메라 캡처
-- [ ] StackChan 공식 키트 주문·수령
-- [ ] xiaozhi 호환 펌웨어 플래싱 (카메라 지원 빌드)
-- [ ] ESP32 카메라 프레임 → 서버 전송 경로 구현
-- [ ] WebSocket 통신으로 전환 (HTTP PCM 폐기)
+### M3 — 실보드 하드웨어 + 카메라 캡처
+> **타깃 변경 (2026-06-30, ALI-21):** StackChan → 기영님 보유 올인원 보드
+> **Waveshare ESP32-S3-Touch-LCD-3.5B**. 상세·핀맵·빌드/검증 절차는
+> `docs/m3-board-bringup.md`.
+- [x] 보드 식별 + 프로파일 확정 — xiaozhi-esp32 `esp32-s3-touch-lcd-3.5b` (핀포팅 불필요)
+- [x] 카메라(OV5640/OV2640) 컨피그 = 보드 빌드 기본 포함 (소스 검증)
+- [x] 카메라 프레임 → 서버 비전 → 한국어 경로 설계 (Brain180 `/api/robot/chat` 비전)
+- [x] **펌웨어 `pio run` 빌드 통과** — 우리 PlatformIO 펌웨어(`waveshare-s3-touch-lcd-35b` env),
+  ES8311+OV5640+멀티파트 `/api/see`. M0 env 보존. (xiaozhi ESP-IDF 대신 독사 코드)
+- [ ] 플래시 + 시리얼 검증 + ES8311 오디오 튜닝 (실물·장비 확보 후 기영님)
 - **완료 기준:** 로봇이 카메라로 본 것을 한국어로 설명
-- **예상:** 3~5일 (배송 대기 별도)
+- **브레인:** Brain180 AI 튜터(`/api/robot/chat`) + 4090 게이트웨이(STT/TTS). xiaozhi는 레퍼런스만.
+  상세 `docs/m3-brain180-integration.md`.
 
 ### M4 — 페르소나 완성 + Multica 통합
 - [ ] 팬틸트 서보 "관찰 후 시선 회피" 제스처 구현
