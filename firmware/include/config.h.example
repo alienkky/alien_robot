@@ -9,6 +9,10 @@
 // Example: "http://192.168.0.20:8787"
 #define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
 
+// API token — must match API_TOKEN in backend/.env. Leave "" to disable auth.
+// Required when the server is exposed to the internet.
+#define API_TOKEN ""
+
 // ---------------------------------------------------------------------------
 // Phase 1 (WebSocket mode): xiaozhi-esp32-server at port 8003
 // Add -DUSE_WEBSOCKET=1 to build_flags in platformio.ini to enable.

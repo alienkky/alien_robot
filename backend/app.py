@@ -34,6 +34,24 @@ def env(name: str, default: str = "") -> str:
     return os.getenv(name, default).strip()
 
 
+def require_api_token(request: Request) -> None:
+    """Reject the request when API_TOKEN is set and the caller does not match.
+
+    Backward compatible: if API_TOKEN is empty/unset, auth is disabled and every
+    request passes. Accepts either `Authorization: Bearer <token>` or `X-API-Key`.
+    """
+    expected = env("API_TOKEN")
+    if not expected:
+        return  # auth disabled
+
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not token:
+        token = request.headers.get("x-api-key", "").strip()
+    if token != expected:
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+
 def write_pcm_as_wav(pcm: bytes, path: Path) -> None:
     with wave.open(str(path), "wb") as wav:
         wav.setnchannels(CHANNELS)
@@ -195,6 +213,7 @@ async def health() -> dict[str, str]:
 
 @app.post("/api/turn")
 async def turn(request: Request) -> dict[str, str | None]:
+    require_api_token(request)
     pcm = await request.body()
     if len(pcm) < SAMPLE_RATE * SAMPLE_WIDTH_BYTES // 2:
         raise HTTPException(status_code=400, detail="PCM body is too short")
@@ -209,7 +228,8 @@ async def turn(request: Request) -> dict[str, str | None]:
 
 
 @app.get("/audio/{filename}")
-async def audio(filename: str) -> FileResponse:
+async def audio(filename: str, request: Request) -> FileResponse:
+    require_api_token(request)
     path = ARTIFACT_DIR / filename
     if not path.exists() or path.suffix.lower() != ".wav":
         raise HTTPException(status_code=404, detail="Audio not found")

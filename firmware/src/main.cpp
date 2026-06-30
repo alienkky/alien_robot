@@ -135,6 +135,10 @@ String postTurn() {
   String url = String(AI_SERVER_BASE_URL) + "/api/turn";
   http.begin(url);
   http.addHeader("Content-Type", "application/octet-stream");
+  // Attach bearer token when configured; server rejects with 401 if mismatched.
+  if (strlen(API_TOKEN) > 0) {
+    http.addHeader("Authorization", String("Bearer ") + API_TOKEN);
+  }
   int status = http.POST(pcmBuffer, pcmBytes);
   if (status <= 0) {
     Serial.printf("POST failed: %s\n", http.errorToString(status).c_str());
@@ -159,6 +163,10 @@ void playWavFromUrl(const char *path) {
   HTTPClient http;
   String url = String(AI_SERVER_BASE_URL) + path;
   http.begin(url);
+  // /audio is also token-protected; send the same bearer token.
+  if (strlen(API_TOKEN) > 0) {
+    http.addHeader("Authorization", String("Bearer ") + API_TOKEN);
+  }
   int status = http.GET();
   if (status != 200) {
     Serial.printf("Audio GET failed: %d\n", status);
