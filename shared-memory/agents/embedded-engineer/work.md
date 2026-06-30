@@ -42,3 +42,9 @@
 - platformio.ini: M0 env는 build_src_filter로 분리 보존. 두 env 모두 pio run SUCCESS
   (RAM15.7%/Flash30.5%). esp_camera/I2S/멀티파트 링크 OK.
 - 미검증(실보드): ES8311 레지스터 init·I2S 클럭(드라이버 UNVERIFIED 배너). 카메라 핀은 보드 프로파일 일치.
+
+## 2026-06-30 (5차) · 실증 검증 런북 작성
+- 기영님: 집 가서 실증 검증할 작업방법 자세히 정리.
+- docs/m3-bringup-runbook.md 신규: ①Brain180(Railway 권장/로컬) ②게이트웨이(4090, .env, 보드없이 MOCK_TRANSCRIPT 선검증)
+  ③펌웨어(config_waveshare.h, pio upload, 시리얼 체크리스트) + 트러블슈팅 표 + 흐름도.
+- 핵심 주의: 카메라 비전은 brain180에 OpenAI/Anthropic 키 필요(Kimi는 이미지 못 봄). 4090 방화벽 8787.
