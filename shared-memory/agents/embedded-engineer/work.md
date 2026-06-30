@@ -48,3 +48,9 @@
 - docs/m3-bringup-runbook.md 신규: ①Brain180(Railway 권장/로컬) ②게이트웨이(4090, .env, 보드없이 MOCK_TRANSCRIPT 선검증)
   ③펌웨어(config_waveshare.h, pio upload, 시리얼 체크리스트) + 트러블슈팅 표 + 흐름도.
 - 핵심 주의: 카메라 비전은 brain180에 OpenAI/Anthropic 키 필요(Kimi는 이미지 못 봄). 4090 방화벽 8787.
+
+## 2026-06-30 (6차) · 비전공자용 따라하기 가이드
+- 기영님 "모르겠어" → 터미널/Railway/펌웨어 클릭 단위 초보 가이드.
+- docs/m3-step-by-step-beginner.md: 전체그림 표 + B(Railway 클릭) + A(PowerShell 게이트웨이, 보드없이 글자테스트) + C(VS Code+PlatformIO 버튼) + 막힘 표.
+- alien_robot 기본브랜치=ali-112-...(main 아님). 코드는 agent/embedded-engineer/4d2c69d9 → clone -b 로 안내.
+- brain180 Railway 배포 브랜치 = feat/robot-bridge-ali21.
