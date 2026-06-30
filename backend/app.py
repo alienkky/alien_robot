@@ -177,9 +177,15 @@ async def ask_brain180(transcript: str, image_b64: str | None = None) -> str:
             )
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        # Surface Brain180's structured error code (e.g. upstream_error) to logs.
-        detail = exc.response.text[:300] if exc.response is not None else str(exc)
-        raise HTTPException(status_code=502, detail=f"Brain180 request failed: {detail}") from exc
+        # Surface Brain180's HTTP status + structured error code. The status code
+        # matters even when the body is empty (e.g. 401 token mismatch, 404 wrong
+        # URL/branch, 502 edge), so always include it.
+        status = exc.response.status_code if exc.response is not None else "?"
+        body = exc.response.text[:300] if exc.response is not None else str(exc)
+        detail = body.strip() or "(empty body)"
+        raise HTTPException(
+            status_code=502, detail=f"Brain180 request failed: HTTP {status} {detail}"
+        ) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"Brain180 unreachable: {exc}") from exc
 
