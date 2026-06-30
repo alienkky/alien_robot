@@ -18,6 +18,31 @@
 
 ---
 
+## 0.5 재부팅/재시작 후 — 이미 한 번 설치했다면 이것만 (3분)
+
+처음 설치(코드 받기·venv·pip·.env 작성)는 **재부팅해도 안 사라집니다.** 다시 설치하지 말 것.
+brain180은 Railway(클라우드)라 PC와 무관하게 계속 떠 있음. **게이트웨이만 다시 켜면 됩니다.**
+
+```powershell
+# 1) 게이트웨이 켜기
+cd $HOME\Desktop\alien_robot\backend
+.\.venv\Scripts\Activate.ps1
+uvicorn app:app --host 0.0.0.0 --port 8787
+#   "Application startup complete." 뜨고 그 아래 빨간 ERROR 없으면 OK. 이 창은 켜둔다.
+```
+```powershell
+# 2) (새 PowerShell 창) brain180 살아있는지 + 게이트웨이 글자 테스트
+curl.exe -H "Authorization: Bearer 진짜토큰" https://brain180-production.up.railway.app/api/robot/health
+cd $HOME\Desktop\alien_robot\backend
+$bytes = New-Object byte[] 32000
+[IO.File]::WriteAllBytes("$PWD\silence.pcm", $bytes)
+curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@silence.pcm" http://127.0.0.1:8787/api/turn
+```
+- health가 `"status":"ok"`, 글자테스트가 `"answer":"...한국어..."` 면 정상 가동.
+- 보드까지 쓸 거면 그다음 C(펌웨어)로. (설치가 처음이면 아래 B부터.)
+
+---
+
 ## B. Railway 하는 방법 (브라우저, 먼저 함)
 
 > Railway = 우리 브레인(brain180)을 인터넷에 띄워 두는 곳. 보드/게이트웨이가 여기로 질문을 보냄.
@@ -105,14 +130,17 @@ Copy-Item config.example.env .env
 ```
 notepad .env
 ```
-메모장이 뜨면 아래 4줄을 찾아(또는 추가해) 채우고 저장:
+메모장이 뜨면 아래 4줄을 채우고 저장:
 ```
 LLM_PROVIDER=brain180
 BRAIN180_BASE_URL=https://여기에-B6에서-적은-railway-주소
 BRAIN180_DEVICE_TOKEN=여기에-B1에서-만든-토큰
 MOCK_TRANSCRIPT=안녕, 너 누구야?
 ```
+- ⚠️ **`LLM_PROVIDER` 는 파일에 이미 `LLM_PROVIDER=ollama` 로 들어있음. 그 줄을 `brain180`으로
+  "바꿔야" 함**(새 줄을 또 추가하지 말 것). ollama 그대로면 A-7에서 `Ollama ... 404` 에러가 남.
 - 마지막 `MOCK_TRANSCRIPT` 는 **보드 없이 글자로 먼저 시험**하려고 임시로 넣는 것(나중에 지움).
+- 저장 후 확인(선택): `Get-Content .env | Select-String "LLM_PROVIDER|BRAIN180"` → `LLM_PROVIDER=brain180` 한 줄만 보이면 정상.
 
 ### A-6. 게이트웨이 켜기
 ```
@@ -137,7 +165,13 @@ curl.exe -X POST -H "Content-Type: application/octet-stream" --data-binary "@sil
 ```
 ipconfig
 ```
-- `IPv4 주소 . . . : 192.168.x.x` 를 찾아 **메모.** (보드가 이 주소로 게이트웨이를 부름.)
+- 여러 개가 나오면 **"이더넷 어댑터 이더넷"(또는 Wi-Fi 어댑터)의 IPv4** 하나만 씀. 나머지는 제외:
+  - **Tailscale (100.x)** = VPN → ✗
+  - **vEthernet (Default Switch / WSL) (172.x)** = 가상 네트워크 → ✗
+  - **Bluetooth** = ✗
+- ⚠️ **보드(ESP32)와 이 PC가 같은 공유기(같은 Wi-Fi)에 있어야** 보드가 이 IP로 붙음.
+  - 보드 붙일 Wi-Fi에 스마트폰을 연결해 폰 IP 대역을 보면 같은 망인지 알 수 있음(예: 폰이 `192.168.0.x`인데 PC가 `220.x`면 서로 다른 망 → PC를 그 공유기에 유선으로 연결하고 다시 ipconfig).
+- 찾은 IPv4를 **메모.** (보드가 이 주소로 게이트웨이를 부름.)
 - **윈도우 방화벽**이 물어보면 "허용". (8787 포트가 막히면 보드가 못 붙음.)
 
 ---
@@ -197,6 +231,8 @@ ipconfig
 |---|---|
 | `Activate.ps1` 빨간 보안 에러 | `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` (Y) 후 다시 |
 | `git`/`python` "인식할 수 없는" | 미설치 → A-2대로 설치 후 창 다시 열기 |
+| `[Errno 10048] ... bind ... 8787` | 8787 포트가 이미 점유됨(이전 uvicorn 창이 안 닫힘/중복 실행). 이전 창에서 Ctrl+C 하거나: `netstat -ano \| findstr :8787` 로 맨 끝 PID 확인 → `taskkill /PID <PID> /F` → 다시 uvicorn |
+| 글자 테스트가 `Ollama ... 404` | `.env`의 `LLM_PROVIDER`가 아직 `ollama`임. **`brain180`으로 바꾸고 uvicorn 재시작**(.env 수정은 재시작해야 반영) |
 | 글자 테스트가 `502` | A-5 주소/토큰이 B의 값과 똑같은지 |
 | 답이 "이미지를 볼 수 없습니다" | Railway에 `OPENAI_API_KEY` 추가(B-5) |
 | 업로드시 보드 안 잡힘 | BOOT 누른 채 RESET 후 다시 Upload. USB 케이블 교체 |
