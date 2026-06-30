@@ -151,11 +151,13 @@ I2S mic -> ESP32-S3 -> HTTP PCM upload -> local AI server
 - **예상:** 반나절 (CUDA·양자화 호환 삽질 포함)
 
 ### M2 — xiaozhi-server 이관 + 비전 활성화
-- [ ] xiaozhi-esp32-server를 docker-compose에 추가 (포트 8003)
-- [ ] config.yaml에 페르소나·모듈(SenseVoice/EdgeTTS/Qwen3.6) 설정
-- [ ] LLM과 VLLM을 동일 Qwen3.6 엔드포인트로 연결
-- **완료 기준:** 서버 단에서 이미지+텍스트 멀티모달 응답
+- [x] xiaozhi-esp32-server를 docker-compose에 추가 (WS=host 8003, OTA/비전 HTTP=host 8002)
+- [x] config.yaml에 페르소나·모듈(SenseVoice/EdgeTTS/Qwen3.6) 설정
+- [x] LLM과 VLLM을 동일 Qwen3.6 엔드포인트로 연결 (둘 다 base_url=http://vllm:8000/v1, model=qwen36)
+- **완료 기준:** 서버 단 멀티모달 한국어 응답 — vLLM 공용 엔드포인트로 검증 (ESP32 사진 → 한국어 설명). 단말→WS→비전→한국어 음성 전체 루프는 M2(단말)/통합 범위.
 - **예상:** 1~2일
+- **상세 절차:** `docs/m2-xiaozhi-runbook.md`
+- **주의(xiaozhi 비전 quirk):** 이미지 `VLLMProvider.response()`가 `(请使用中文回复)`를 하드코딩 → 비전 raw 출력은 중국어. 한국어는 대화 LLM(페르소나 프롬프트)이 비전 결과를 대화에 엮을 때 산출. 이미지 자체 교체 없이는 변경 불가 → 페르소나/통합 단계 검토.
 
 ### M3 — StackChan 하드웨어 + 카메라 캡처
 - [ ] StackChan 공식 키트 주문·수령

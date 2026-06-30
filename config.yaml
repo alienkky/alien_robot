@@ -14,9 +14,11 @@ selected_module:
   Intent: function_call
 
 # ───── 음성 인식 (로컬, 한국어) ─────
+# FunASR 로컬 SenseVoiceSmall. xiaozhi-server type 식별자는 fun_local
+# (모델 가중치 model.pt는 models/SenseVoiceSmall/ 에 위치, 이미지 미포함분 별도 배치).
 ASR:
   SenseVoice:
-    type: sense_voice
+    type: fun_local
     model_dir: models/SenseVoiceSmall
     output_dir: tmp/
 
