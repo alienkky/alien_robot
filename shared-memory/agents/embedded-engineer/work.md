@@ -23,3 +23,13 @@
   ESP32=단순 단말, 4090 robot-gateway가 STT/TTS+brain180 호출 흡수.
 - 미해결(기영님): vLLM 거취/프라이버시, 로봇 레슨 vs 디바이스 엔드포인트, 디바이스 인증,
   brain180 로컬 vs Railway, STT/TTS 자체구현.
+
+## 2026-06-30 (3차) · ALI-21 Brain180 연동 구현
+- 기영님: 직접 판단해 구현, 우선=연동, Railway 우선, vLLM 추후, STT/TTS 효율.
+- Brain180(브랜치 feat/robot-bridge-ali21): POST /api/robot/chat 신설(베어러 토큰, 무상태,
+  로봇 페르소나, 텍스트+비전). GET /api/robot/health. RobotChatBody/ROBOT_DEVICE_TOKEN/8mb바디.
+  smoke:robot. tsc+eslint 통과. 추가 전용(토큰 없으면 503).
+- 게이트웨이(backend/app.py): LLM_PROVIDER=brain180 + ask_brain180(history,image). /api/turn 유지
+  (M0 펌웨어 무수정). /api/see(카메라 멀티파트)·/api/reset. faster-whisper+Piper 재사용.
+  스텁 종단 통합테스트 PASS. 문서: m3-brain180-integration.md §4.5, protocol.md.
+- 남음: 실보드 카메라 펌웨어 포팅, brain180 AI_PROVIDER→vLLM(프라이빗), 4090 라이브 실호출.

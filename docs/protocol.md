@@ -48,6 +48,24 @@ Returns:
 
 Use this endpoint to confirm LAN connectivity before debugging audio.
 
+## `POST /api/see` (M3 비전 턴 — `LLM_PROVIDER=brain180` 전용)
+
+멀티파트 폼. 카메라 펌웨어용. `/api/turn`과 같은 응답이지만 카메라 프레임을 첨부한다.
+
+- `audio` (file): raw 16kHz mono s16le PCM. 또는
+- `text` (form field): STT 대신 직접 텍스트.
+- `image` (file, optional): JPEG 프레임. 게이트웨이가 base64로 brain180 비전에 전달.
+
+응답: `{"transcript", "answer", "audio_url"}` (`/api/turn`과 동일).
+
+## `POST /api/reset`
+
+로봇의 롤링 대화 메모리 초기화. `{"status":"ok"}`.
+
+> M3에서 게이트웨이의 `LLM_PROVIDER=brain180` 이면 브레인은 Brain180 AI 튜터
+> (`POST /api/robot/chat`)다. `/api/turn`은 그대로라 M0 펌웨어는 무수정 동작.
+> 상세: `docs/m3-brain180-integration.md`.
+
 ## Why HTTP First
 
 HTTP request-response is intentionally used for the first milestone. It is slower than streaming, but easier to debug with Serial logs, `curl`, and saved PCM files. After the base loop is stable, the next version should move to WebSocket streaming with voice activity detection.

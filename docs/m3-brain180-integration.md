@@ -109,6 +109,55 @@ Brain180은 React(Vite) + **Express/Node** + Postgres(Drizzle) + Lucia 인증의
 
 ---
 
+## 4.5 구현 상태 (2026-06-30 — 1차 연동 완료, Railway/Kimi 기준)
+
+기영님 결정(직접 판단해 구현, 우선순위=연동, Railway 우선, STT/TTS는 효율적으로)에
+따라 **brain180↔로봇 연동의 코어를 구현**했다. 결정 처리:
+- **vLLM/Qwen3.6:** 지금은 brain180 기본값(Kimi)로 둔다. 프라이빗 전환은 brain180
+  `AI_PROVIDER` env 교체만으로 됨(게이트웨이/펌웨어 변경 0). → **나중에 스위치.**
+- **레슨 종속:** brain180에 **레슨 비종속 디바이스 엔드포인트 `/api/robot/chat`** 신설로 제거.
+- **STT/TTS(효율 우선):** 기존 M0 백엔드의 **faster-whisper(STT)+Piper(TTS, 장치용 WAV
+  정규화)** 를 그대로 재사용. (EdgeTTS 전환은 추후 옵션. 새 의존성·트랜스코드 회피.)
+
+### 무엇을 만들었나
+**A. Brain180 (브랜치 `feat/robot-bridge-ali21`)**
+- `POST /api/robot/chat` — 베어러 토큰(`ROBOT_DEVICE_TOKEN`) 인증, 무상태(게이트웨이가
+  `history` 전달), **Alien Robot 페르소나**(간결 한국어), 텍스트 + 카메라 이미지 비전.
+  기존 LLM 시드(Kimi/Anthropic)·비전 래퍼 재사용 → vLLM 전환은 env 교체.
+- `GET /api/robot/health` 준비성 프로브. `RobotChatBody` 검증, `/api/robot`만 8MB 바디(카메라).
+- `npm run smoke:robot` 스모크. **추가 전용** — 토큰 미설정 시 503(기존 배포 무영향). `tsc`/`eslint` 통과.
+
+**B. Alien Robot 게이트웨이 (`backend/app.py` 확장)**
+- `LLM_PROVIDER=brain180` 추가 → `ask_brain180()` 가 `/api/robot/chat` 호출(히스토리·이미지).
+- **`/api/turn`(M0 프로토콜) 그대로** → **기존 M0 펌웨어는 서버 IP만 게이트웨이로 바꾸면 무수정 동작.**
+- 신규 `POST /api/see`(멀티파트: PCM/텍스트 + JPEG) → 카메라 비전 턴. `POST /api/reset`(대화 메모리 초기화).
+- 롤링 대화 메모리(최근 N턴), `config.example.env`에 brain180 변수.
+- **검증:** brain180 스텁으로 종단 통합 테스트 통과(턴 전달·베어러·히스토리 누적·이미지 첨부·리셋).
+
+### 실행 절차 (4090, 기영님/infra)
+```bash
+# 1) Brain180 (Railway 또는 4090 로컬). 로컬이면:
+cd brain180 && npm ci
+#   .env: DATABASE_URL(Postgres), KIMI_API_KEY 등 + ROBOT_DEVICE_TOKEN=<랜덤 비밀>
+npm run dev:server                       # :3001
+ROBOT_DEVICE_TOKEN=<...> npm run smoke:robot   # 연동 확인
+
+# 2) 게이트웨이(M0 백엔드)
+cd alien_robot/backend && pip install -r requirements.txt
+cp config.example.env .env
+#   .env: LLM_PROVIDER=brain180, BRAIN180_BASE_URL=<railway-url 또는 http://127.0.0.1:3001>,
+#         BRAIN180_DEVICE_TOKEN=<위와 동일 토큰>, WHISPER_*; (음성 출력 원하면) PIPER_BIN/PIPER_MODEL
+uvicorn app:app --host 0.0.0.0 --port 8787
+
+# 3) ESP32(M0 펌웨어): config.h 의 서버 IP를 게이트웨이(4090:8787)로. POST /api/turn 그대로.
+```
+
+### 남은 일
+- **펌웨어 카메라 경로:** Waveshare 3.5B(ES8311+OV5640)로 M0 흐름 포팅 + `/api/see` 멀티파트
+  전송 = **실물 보드 확보 후** (핀맵 `m3-board-bringup.md` 유효). 그전엔 M0 DIY 보드가 음성 단말 스탠드인.
+- **프라이빗 전환:** brain180 `AI_PROVIDER`를 4090 vLLM/Qwen3.6로(인프라).
+- 라이브 STT/LLM/TTS 실호출은 4090(모델·키·DB 필요). 본 작업은 빌드·종단 스텁 통합까지 검증.
+
 ## 5. 재사용/폐기 정리
 - ✅ 재사용: 보드 핀맵·하드웨어 분석(`m3-board-bringup.md` §1·§2), M0 `firmware/main.cpp` 흐름.
 - ✅ 레퍼런스만: xiaozhi-esp32 펌웨어/서버(프로토콜·비전 MCP 아이디어 참고).
