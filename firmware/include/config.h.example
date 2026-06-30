@@ -3,10 +3,27 @@
 #define WIFI_SSID "YOUR_WIFI_SSID"
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 
+// ---------------------------------------------------------------------------
+// Phase 0 (HTTP mode, default): FastAPI backend at port 8787
+// ---------------------------------------------------------------------------
 // Example: "http://192.168.0.20:8787"
 #define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
 
-// GPIO pins. Adjust for your board and wiring.
+// API token — must match API_TOKEN in backend/.env. Leave "" to disable auth.
+// Required when the server is exposed to the internet.
+#define API_TOKEN ""
+
+// ---------------------------------------------------------------------------
+// Phase 1 (WebSocket mode): xiaozhi-esp32-server at port 8003
+// Add -DUSE_WEBSOCKET=1 to build_flags in platformio.ini to enable.
+// ---------------------------------------------------------------------------
+#define XIAOZHI_SERVER_HOST "YOUR_SERVER_IP"   // e.g. "192.168.0.20"
+#define XIAOZHI_SERVER_PORT 8003
+#define XIAOZHI_SERVER_PATH "/xiaozhi/v1/"
+
+// ---------------------------------------------------------------------------
+// GPIO pins — match docs/hardware.md
+// ---------------------------------------------------------------------------
 #define PIN_BUTTON 0
 #define PIN_STATUS_LED 2
 
