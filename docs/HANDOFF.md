@@ -157,13 +157,18 @@ I2S mic -> ESP32-S3 -> HTTP PCM upload -> local AI server
 - **완료 기준:** 서버 단에서 이미지+텍스트 멀티모달 응답
 - **예상:** 1~2일
 
-### M3 — StackChan 하드웨어 + 카메라 캡처
-- [ ] StackChan 공식 키트 주문·수령
-- [ ] xiaozhi 호환 펌웨어 플래싱 (카메라 지원 빌드)
-- [ ] ESP32 카메라 프레임 → 서버 전송 경로 구현
-- [ ] WebSocket 통신으로 전환 (HTTP PCM 폐기)
+### M3 — 실보드 하드웨어 + 카메라 캡처
+> **타깃 변경 (2026-06-30, ALI-21):** StackChan → 기영님 보유 올인원 보드
+> **Waveshare ESP32-S3-Touch-LCD-3.5B**. 상세·핀맵·빌드/검증 절차는
+> `docs/m3-board-bringup.md`.
+- [x] 보드 식별 + 프로파일 확정 — xiaozhi-esp32 `esp32-s3-touch-lcd-3.5b` (핀포팅 불필요)
+- [x] 카메라(OV5640/OV2640) 컨피그 = 보드 빌드 기본 포함 (소스 검증)
+- [x] 카메라 프레임 → 서버(Qwen3.6 비전) → 한국어 경로 설계 (MCP `take_photo`)
+- [ ] `idf.py build` 빌드 통과 (ESP-IDF 환경 확보 후 — PlatformIO 아님)
+- [ ] 플래시 + 시리얼 검증 (실물·장비 확보 후 기영님)
 - **완료 기준:** 로봇이 카메라로 본 것을 한국어로 설명
-- **예상:** 3~5일 (배송 대기 별도)
+- **참고:** xiaozhi 공식 펌웨어가 WebSocket+MCP+비전 전부 제공 → **ALI-20(커스텀
+  WebSocket)은 불필요 가능성** (infra 조율).
 
 ### M4 — 페르소나 완성 + Multica 통합
 - [ ] 팬틸트 서보 "관찰 후 시선 회피" 제스처 구현
