@@ -15,8 +15,14 @@
 #define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
 
 // 4090 robot-gateway (backend/app.py, LLM_PROVIDER=brain180). Vision turn path.
-// Example: "http://192.168.0.20:8787"
+// LAN example: "http://192.168.0.20:8787"
+// Remote via the Tailscale Funnel infra set up: "https://alien-4090.taile7f882.ts.net:8443"
 #define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
+
+// Inbound device auth. When the gateway is exposed publicly (Funnel), it checks
+// an X-Device-Token header. Paste the shared value from infra here. Leave "" for
+// an open LAN gateway (no header sent).
+#define DEVICE_TOKEN ""
 
 // Camera SCCB shares CoreS3's internal I2C bus (SDA=12, SCL=11). That bus is
 // port 1 (Wire1) on CoreS3. esp_camera reuses this existing port instead of

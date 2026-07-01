@@ -230,6 +230,7 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   WiFiClientSecure secure;
   WiFiClient plain;
   httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/see");
+  if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
   int code = http.POST(body, bodyLen);
   String resp;
@@ -252,6 +253,7 @@ void fetchAndPlay(const String &audioUrl) {
   // audioUrl may be a full https URL or a path relative to the gateway base.
   String full = audioUrl.startsWith("http") ? audioUrl : (String(AI_SERVER_BASE_URL) + audioUrl);
   httpBegin(http, secure, plain, full);
+  if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   int code = http.GET();
   if (code == 200) {
     int len = http.getSize();
@@ -358,7 +360,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v3 (https tunnel support)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v4 (https + X-Device-Token)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
