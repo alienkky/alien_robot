@@ -94,7 +94,10 @@ camera_config_t makeCameraConfig() {
   c.frame_size = FRAMESIZE_QVGA;      // 320x240 — small vision payload
   c.fb_count = 2;
   c.fb_location = CAMERA_FB_IN_PSRAM;
-  c.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  // GRAB_LATEST (not WHEN_EMPTY): always return the newest frame and recycle old
+  // buffers. WHEN_EMPTY hands back a buffer filled while idle, so every turn
+  // showed the same stale (first) image. Combined with the drain in captureFresh.
+  c.grab_mode = CAMERA_GRAB_LATEST;
   // Reuse the already-initialised internal I2C port instead of releasing it,
   // so touch + the audio codecs keep their bus. See CAM_SCCB_I2C_PORT note.
   c.sccb_i2c_port = CAM_SCCB_I2C_PORT;
@@ -224,6 +227,17 @@ bool setupCamera() {
   }
   Serial.println("[cam] GC0308 init OK");
   return true;
+}
+
+// Returns a FRESH frame. The DVP ring buffers hold frames captured earlier
+// (while idle), so we drop a couple of stale ones first — otherwise every turn
+// reuses the same old image. Caller must esp_camera_fb_return() the result.
+camera_fb_t *captureFresh() {
+  for (int i = 0; i < 2; i++) {
+    camera_fb_t *stale = esp_camera_fb_get();
+    if (stale) esp_camera_fb_return(stale);
+  }
+  return esp_camera_fb_get();
 }
 
 bool touchPressed() {
@@ -392,7 +406,7 @@ void handleTurn(bool holdMode) {
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
   if (cameraOk) {
-    camera_fb_t *fb = esp_camera_fb_get();
+    camera_fb_t *fb = captureFresh();  // drop stale buffers, grab a new frame
     if (fb) {
       showPhoto(fb);  // display the captured photo for ~1.5s
       if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
@@ -456,7 +470,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v6 (image tuning: swap/mirror)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v7 (fresh-frame capture)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD
