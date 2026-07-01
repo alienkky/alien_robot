@@ -57,17 +57,30 @@ bool i2cReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
   return true;
 }
 
-void setupSharedI2C(int sdaPin, int sclPin) {
+bool isValidS3Gpio(int pin) {
+  return (pin >= 0 && pin <= 21) || (pin >= 26 && pin <= 48);
+}
+
+bool setupSharedI2C(int sdaPin, int sclPin) {
+  if (!isValidS3Gpio(sdaPin) || !isValidS3Gpio(sclPin)) {
+    Serial.printf("[i2c] skip invalid ESP32-S3 pins SDA=%d SCL=%d\n", sdaPin, sclPin);
+    return false;
+  }
+
   // xiaozhi's ESP-IDF profile enables internal pull-ups on this shared bus.
   // Without pull-ups, this clone board can report zero devices on SDA8/SCL7.
   pinMode(sdaPin, INPUT_PULLUP);
   pinMode(sclPin, INPUT_PULLUP);
   delay(5);
-  Wire.begin(sdaPin, sclPin, ES8311_I2C_FREQ);
+  bool ok = Wire.begin(sdaPin, sclPin, ES8311_I2C_FREQ);
+  if (!ok) {
+    Serial.printf("[i2c] begin failed SDA=%d SCL=%d\n", sdaPin, sclPin);
+  }
+  return ok;
 }
 
-void setupSharedI2C() {
-  setupSharedI2C(activeI2cSda, activeI2cScl);
+bool setupSharedI2C() {
+  return setupSharedI2C(activeI2cSda, activeI2cScl);
 }
 
 void waitForSerial() {
@@ -148,7 +161,7 @@ int scanI2COnPins(const char *label, int sdaPin, int sclPin) {
   Wire.end();
   activeI2cSda = sdaPin;
   activeI2cScl = sclPin;
-  setupSharedI2C();
+  if (!setupSharedI2C()) return 0;
   delay(30);
   return scanI2C(label);
 }
@@ -163,7 +176,6 @@ void discoverI2CBus() {
   const Candidate candidates[] = {
       {"xiaozhi-3.5b", 8, 7},
       {"waveshare-4b", 47, 48},
-      {"esp32-3.5", 21, 22},
       {"swapped-3.5b", 7, 8},
       {"alt-8-9", 8, 9},
       {"alt-9-8", 9, 8},
@@ -432,7 +444,8 @@ void handleTurn() {
 void setup() {
   Serial.begin(115200);
   waitForSerial();
-  Serial.println("[boot] alien_robot waveshare custom-fw i2c-discovery-v3");
+  Serial.println("[boot] alien_robot waveshare custom-fw i2c-discovery-v4");
+  delay(1500);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
 
   pcmBuffer = static_cast<uint8_t *>(ps_malloc(kMaxPcmBytes));
