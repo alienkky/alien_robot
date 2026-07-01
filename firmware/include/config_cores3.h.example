@@ -1,0 +1,25 @@
+#pragma once
+// ─────────────────────────────────────────────────────────────────────
+// Board profile: M5Stack CoreS3 (ESP32-S3 N16R8).
+// Used by the `cores3` PlatformIO env (main_cores3.cpp), Route A:
+//   M5Unified (screen/mic/speaker/power) + esp_camera (GC0308 sensor).
+//
+// Copy to config_cores3.h and fill Wi-Fi + gateway URL. Do NOT commit secrets.
+//
+// CoreS3 has NO fixed hardware pin config here on purpose: M5Unified owns the
+// display/audio/power pins (via AXP2101 + AW9523), and the camera pins are
+// board-fixed constants inside main_cores3.cpp. Only secrets live in this file.
+// ─────────────────────────────────────────────────────────────────────
+
+#define WIFI_SSID "YOUR_WIFI_SSID"
+#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
+
+// 4090 robot-gateway (backend/app.py, LLM_PROVIDER=brain180). Vision turn path.
+// Example: "http://192.168.0.20:8787"
+#define AI_SERVER_BASE_URL "http://YOUR_SERVER_IP:8787"
+
+// Camera SCCB shares CoreS3's internal I2C bus (SDA=12, SCL=11). That bus is
+// port 1 (Wire1) on CoreS3. esp_camera reuses this existing port instead of
+// releasing it, so touch + the ES7210/AW88298 audio codecs keep working.
+// If `esp_camera_init` fails with 0x105 (NOT_FOUND) on hardware, try 0.
+#define CAM_SCCB_I2C_PORT 1

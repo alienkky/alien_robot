@@ -16,3 +16,18 @@
 - 본문 {session_id, lesson_id, message, canvas_image_base64?}. 선행: /api/auth/login + /api/practice/sessions.
 - canvas_image_base64(PNG)로 비전 입력 가능 → 카메라 프레임을 여기에 넣으면 튜터가 봄(별도 비전모델 불필요).
 - LLM=Kimi(기본)/Anthropic, 비전=OpenAI gpt-4.1-mini/Anthropic. 전부 클라우드. STT/TTS/WS 미제공.
+
+## 2026-07-01 — waveshare 실보드: I2C 버스 0 device = 보드 정체 미확정 신호
+- 실기 플래시/부팅 로그: I2C 스캔 5개 후보핀(8/7, 47/48, 7/8, 8/9, 9/8) 전부 `0 device`. AXP2101/ES8311/카메라(0x105) 모두 no-ACK.
+- `idle=1/1` → 풀업·배선 정상, 버스 안 죽음. 그런데 아무도 ACK 안 함 → "그 핀에 칩 없음".
+- 화면 깜깜(`[lcd] init OK` 떠도)의 원인도 동일: 백라이트·오디오·카메라가 AXP2101 전원 뒤에 매달림. I2C 죽으면 전원 순서 못 넣어 통째로 죽음.
+- **적신호 2개**: (1) esptool `8MB Flash` vs 문서 N16R8(16MB) 불일치. (2) m3-board-bringup.md §1 "보드 실크/AXS15231B 육안확인" 미완료.
+- 결론: 블라인드 핀 추측(probe matrix) 중단. 기영님께 보드 앞·뒷면 사진(실크/화면칩)+구매링크 요청. 진짜 3.5B면 수제 PlatformIO 대신 공식 xiaozhi ESP-IDF 펌웨어가 정석(문서 TL;DR과도 일치).
+
+## 2026-07-01 (2) — 보드 확정: Spotpear ESP32-S3-MAX35 (GC0308 · Deepseek)
+- 기영님이 보드 URL 제공: spotpear.cn .../ESP32-S3-3.5-inch-LCD-...-GC0308-Deepseek.html
+- 스펙: 카메라 **GC0308**(OV5640 아님), 코덱 **ES8311**(일치), 충전 **MP2636GR**(AXP2101 아님!), 앰프 NS4150B. → main_waveshare.cpp 가정(OV5640/OV2640 + AXP2101 + AXS15231B SDA8/SCL7)과 불일치.
+- 지난 로그 실패 1:1 대응: axp2101 FAILED=칩없음, cam 0x105=GC0308 vs OV, I2C 0-device=핀불일치.
+- Spotpear 형제 보드 2종(OV5640: AXS15231B-QSPI / ST7796)과 별개 — 기영님 건 GC0308 변형.
+- **결론/방향**: 수제 PlatformIO 핀추측 중단. 이 보드는 공식 xiaozhi-esp32(github.com/78/xiaozhi-esp32) 네이티브. 1단계=공식 xiaozhi로 보드 살리기, 2단계=Brain180 /api/see 비전 연동은 별도(인프라 조율, xiaozhi 기본은 WS to xiaozhi-server). m3-board-bringup.md TL;DR과 일치.
+- 대기중: 기영님이 실크 모델명 확인 + Spotpear 자료(원리도/데모펌웨어) 제공 예정.
