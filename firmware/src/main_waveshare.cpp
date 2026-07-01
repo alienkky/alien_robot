@@ -39,12 +39,80 @@ constexpr i2s_port_t kI2sPort = I2S_NUM_0;  // ES8311 is full-duplex on one bus
 ES8311 codec;
 uint8_t *pcmBuffer = nullptr;
 
+bool i2cWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  Wire.write(val);
+  return Wire.endTransmission() == 0;
+}
+
+bool i2cReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
+  Wire.beginTransmission(addr);
+  Wire.write(reg);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom(static_cast<int>(addr), 1) != 1) return false;
+  val = Wire.read();
+  return true;
+}
+
+void setupSharedI2C() {
+  // xiaozhi's ESP-IDF profile enables internal pull-ups on this shared bus.
+  // Without pull-ups, this clone board can report zero devices on SDA8/SCL7.
+  pinMode(ES8311_I2C_SDA, INPUT_PULLUP);
+  pinMode(ES8311_I2C_SCL, INPUT_PULLUP);
+  Wire.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_FREQ);
+}
+
+bool initTca9554() {
+  constexpr uint8_t kTcaAddr = 0x20;
+  constexpr uint8_t kOutputReg = 0x01;
+  constexpr uint8_t kConfigReg = 0x03;
+
+  uint8_t config = 0xFF;
+  if (!i2cReadReg(kTcaAddr, kConfigReg, config)) {
+    Serial.println("[tca9554] WARN: no I2C ACK");
+    return false;
+  }
+
+  // Match xiaozhi: pins 0/1 output, both low, then pin 1 high.
+  i2cWriteReg(kTcaAddr, kConfigReg, config & ~0x03);
+  delay(100);
+  i2cWriteReg(kTcaAddr, kOutputReg, 0x00);
+  delay(100);
+  bool ok = i2cWriteReg(kTcaAddr, kOutputReg, 0x02);
+  Serial.printf("[tca9554] init %s\n", ok ? "OK" : "FAILED");
+  return ok;
+}
+
+bool initAxp2101() {
+  constexpr uint8_t kAxpAddr = 0x34;
+  bool ok = true;
+
+  // Same power rail sequence as xiaozhi's esp32-s3-touch-lcd-3.5b profile.
+  ok &= i2cWriteReg(kAxpAddr, 0x22, 0x06);  // PWRON > OFFLEVEL source enable
+  ok &= i2cWriteReg(kAxpAddr, 0x27, 0x10);  // hold 4s to power off
+  ok &= i2cWriteReg(kAxpAddr, 0x80, 0x01);  // disable DCs except DC1
+  ok &= i2cWriteReg(kAxpAddr, 0x90, 0x00);  // disable LDOs
+  ok &= i2cWriteReg(kAxpAddr, 0x91, 0x00);
+  ok &= i2cWriteReg(kAxpAddr, 0x82, (3300 - 1500) / 100);  // DC1 3.3V
+  ok &= i2cWriteReg(kAxpAddr, 0x92, (3300 - 500) / 100);   // ALDO1 3.3V
+  ok &= i2cWriteReg(kAxpAddr, 0x96, (1500 - 500) / 100);
+  ok &= i2cWriteReg(kAxpAddr, 0x97, (2800 - 500) / 100);
+  ok &= i2cWriteReg(kAxpAddr, 0x90, 0x31);  // enable ALDO1, BLDO1, BLDO2
+  ok &= i2cWriteReg(kAxpAddr, 0x64, 0x02);  // charger CV 4.1V
+  ok &= i2cWriteReg(kAxpAddr, 0x61, 0x02);  // precharge 50mA
+  ok &= i2cWriteReg(kAxpAddr, 0x62, 0x08);  // charge current 400mA
+  ok &= i2cWriteReg(kAxpAddr, 0x63, 0x01);  // term current 25mA
+
+  Serial.printf("[axp2101] init %s\n", ok ? "OK" : "FAILED");
+  return ok;
+}
+
 // Boot diagnostic: probe every address on the shared I2C bus (SDA=8, SCL=7).
 // Codec (ES8311 0x18), touch, and IMU (QMI8658) all live here — if this finds
 // nothing, the I2C pins/power are wrong; if it finds them, the failures are
 // driver-init issues, not the bus. Camera SCCB reuses this same bus.
 void scanI2C() {
-  Wire.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_FREQ);
   Serial.printf("[i2c-scan] scanning SDA=%d SCL=%d ...\n", ES8311_I2C_SDA, ES8311_I2C_SCL);
   int found = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
@@ -126,7 +194,7 @@ bool setupCamera() {
   config.sccb_i2c_port = 0;
   config.pin_pwdn = CAM_PIN_PWDN;
   config.pin_reset = CAM_PIN_RESET;
-  config.xclk_freq_hz = 20000000;
+  config.xclk_freq_hz = 12000000;       // xiaozhi profile uses 12 MHz on this board
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;     // 640×480 — enough for vision, small payload
   config.jpeg_quality = 12;
@@ -305,19 +373,23 @@ void setup() {
   Serial.begin(115200);
   delay(200);
   pinMode(PIN_BUTTON, INPUT_PULLUP);
+  setupSharedI2C();
 
   pcmBuffer = static_cast<uint8_t *>(ps_malloc(kMaxPcmBytes));
   if (!pcmBuffer) {
     Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
   }
 
+  // xiaozhi powers this board through TCA9554 + AXP2101 before peripherals.
+  scanI2C();
+  initTca9554();
+  initAxp2101();
+  scanI2C();
+
   // Stage 1 display bring-up (non-fatal: the voice loop runs even if the panel
   // init fails). Uses QSPI pins separate from the audio I2C / camera DVP buses.
   display_begin();
   display_boot();
-
-  // Diagnostic: what actually answers on the shared I2C bus? (codec/touch/IMU)
-  scanI2C();
 
   // ES8311 must init the shared I2C bus before the camera reuses port 0.
   codec.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
