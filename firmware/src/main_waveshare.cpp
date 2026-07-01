@@ -63,11 +63,20 @@ void setupSharedI2C() {
   Wire.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_FREQ);
 }
 
+void waitForSerial() {
+  const uint32_t start = millis();
+  while (!Serial && millis() - start < 2500) {
+    delay(10);
+  }
+  delay(300);
+}
+
 bool initTca9554() {
   constexpr uint8_t kTcaAddr = 0x20;
   constexpr uint8_t kOutputReg = 0x01;
   constexpr uint8_t kConfigReg = 0x03;
 
+  Serial.println("[tca9554] init start");
   uint8_t config = 0xFF;
   if (!i2cReadReg(kTcaAddr, kConfigReg, config)) {
     Serial.println("[tca9554] WARN: no I2C ACK");
@@ -87,6 +96,7 @@ bool initTca9554() {
 bool initAxp2101() {
   constexpr uint8_t kAxpAddr = 0x34;
   bool ok = true;
+  Serial.println("[axp2101] init start");
 
   // Same power rail sequence as xiaozhi's esp32-s3-touch-lcd-3.5b profile.
   ok &= i2cWriteReg(kAxpAddr, 0x22, 0x06);  // PWRON > OFFLEVEL source enable
@@ -112,17 +122,17 @@ bool initAxp2101() {
 // Codec (ES8311 0x18), touch, and IMU (QMI8658) all live here — if this finds
 // nothing, the I2C pins/power are wrong; if it finds them, the failures are
 // driver-init issues, not the bus. Camera SCCB reuses this same bus.
-void scanI2C() {
-  Serial.printf("[i2c-scan] scanning SDA=%d SCL=%d ...\n", ES8311_I2C_SDA, ES8311_I2C_SCL);
+void scanI2C(const char *label) {
+  Serial.printf("[i2c-scan:%s] scanning SDA=%d SCL=%d ...\n", label, ES8311_I2C_SDA, ES8311_I2C_SCL);
   int found = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
-      Serial.printf("[i2c-scan] found device 0x%02X\n", addr);
+      Serial.printf("[i2c-scan:%s] found device 0x%02X\n", label, addr);
       found++;
     }
   }
-  Serial.printf("[i2c-scan] done — %d device(s) on the bus\n", found);
+  Serial.printf("[i2c-scan:%s] done — %d device(s) on the bus\n", label, found);
 }
 
 void connectWifi() {
@@ -371,7 +381,8 @@ void handleTurn() {
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  waitForSerial();
+  Serial.println("[boot] alien_robot waveshare custom-fw power-v2");
   pinMode(PIN_BUTTON, INPUT_PULLUP);
   setupSharedI2C();
 
@@ -381,15 +392,17 @@ void setup() {
   }
 
   // xiaozhi powers this board through TCA9554 + AXP2101 before peripherals.
-  scanI2C();
+  scanI2C("pre-power");
   initTca9554();
   initAxp2101();
-  scanI2C();
+  delay(200);
+  scanI2C("post-power");
 
   // Stage 1 display bring-up (non-fatal: the voice loop runs even if the panel
   // init fails). Uses QSPI pins separate from the audio I2C / camera DVP buses.
   display_begin();
   display_boot();
+  scanI2C("post-lcd");
 
   // ES8311 must init the shared I2C bus before the camera reuses port 0.
   codec.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
