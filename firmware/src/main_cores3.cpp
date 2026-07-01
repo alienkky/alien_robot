@@ -339,15 +339,18 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   WiFiClientSecure secure;
   WiFiClient plain;
   httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/see");
+  // A vision turn is STT + Brain180 (vision LLM) + TTS on the server — easily
+  // several seconds. The HTTPClient default read timeout is only 5s, so the
+  // device was giving up before the answer arrived (looked like "no reply").
+  http.setConnectTimeout(15000);
+  http.setTimeout(60000);
   if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  uint32_t t0 = millis();
   int code = http.POST(body, bodyLen);
+  Serial.printf("[http] /api/see -> %d (%lums)\n", code, static_cast<unsigned long>(millis() - t0));
   String resp;
-  if (code == 200) {
-    resp = http.getString();
-  } else {
-    Serial.printf("[http] /api/see -> %d\n", code);
-  }
+  if (code == 200) resp = http.getString();
   http.end();
   free(body);
   return resp;
@@ -362,6 +365,8 @@ void fetchAndPlay(const String &audioUrl) {
   // audioUrl may be a full https URL or a path relative to the gateway base.
   String full = audioUrl.startsWith("http") ? audioUrl : (String(AI_SERVER_BASE_URL) + audioUrl);
   httpBegin(http, secure, plain, full);
+  http.setConnectTimeout(15000);
+  http.setTimeout(60000);
   if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   int code = http.GET();
   if (code == 200) {
@@ -470,7 +475,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v7 (fresh-frame capture)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v8 (http timeout 60s)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD
