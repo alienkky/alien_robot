@@ -38,6 +38,22 @@
 
 #include "config_cores3.h"
 
+// Optional camera tuning knobs default here, so an older config_cores3.h that
+// predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
+// truly required). Override any of these in config_cores3.h to change them.
+#ifndef CAM_SCCB_I2C_PORT
+#define CAM_SCCB_I2C_PORT 1
+#endif
+#ifndef CAM_SWAP_BYTES
+#define CAM_SWAP_BYTES 1
+#endif
+#ifndef CAM_HMIRROR
+#define CAM_HMIRROR 1
+#endif
+#ifndef CAM_VFLIP
+#define CAM_VFLIP 0
+#endif
+
 namespace {
 constexpr int kSampleRate = 16000;
 constexpr int kMaxRecordSeconds = 4;
