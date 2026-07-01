@@ -33,6 +33,7 @@
 
 #include "esp_camera.h"
 #include "img_converters.h"  // frame2jpg() — software RGB565 -> JPEG encoder
+#include "driver/i2c.h"      // i2c_driver_delete() — hand the SCCB bus back to M5
 
 #include "config_cores3.h"
 
@@ -97,7 +98,17 @@ void status(const char *text) {
 
 bool setupCamera() {
   camera_config_t c = makeCameraConfig();
+  // CoreS3 shares ONE internal I2C bus (port 1, SDA=12/SCL=11) across the
+  // AXP2101 PMIC, ES7210/AW88298 codecs, touch AND the camera SCCB. M5.begin()
+  // already installed the I2C driver on that port, so esp_camera_init() cannot
+  // install its own — that is the "i2c driver install error / sccb init err"
+  // seen on hardware. Release M5's bus, let the camera configure GC0308, then
+  // delete the camera's SCCB driver and re-acquire the bus for M5 (SCCB is idle
+  // during DVP frame capture, so audio + touch keep working afterwards).
+  M5.In_I2C.release();
   esp_err_t err = esp_camera_init(&c);
+  i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));
+  M5.In_I2C.begin();
   if (err != ESP_OK) {
     Serial.printf("[cam] init failed 0x%x (try CAM_SCCB_I2C_PORT=0)\n", err);
     return false;
@@ -180,8 +191,13 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
       "Content-Type: image/jpeg\r\n\r\n";
   const String tail = "\r\n--" + boundary + "--\r\n";
 
-  size_t bodyLen = head.length() + audioLen + midA.length() + imgHead.length() +
-                   jpegLen + tail.length();
+  // Image part is optional: when the camera is unavailable (jpegLen == 0) we
+  // POST audio-only so the voice path (STT -> LLM -> TTS) can still be validated
+  // during bring-up. The gateway may require the image for a vision turn.
+  const bool hasImage = (jpeg != nullptr && jpegLen > 0);
+  size_t bodyLen = head.length() + audioLen +
+                   (hasImage ? midA.length() + imgHead.length() + jpegLen : 0) +
+                   tail.length();
   uint8_t *body = static_cast<uint8_t *>(ps_malloc(bodyLen));
   if (!body) {
     Serial.println("[http] ps_malloc body failed");
@@ -190,9 +206,11 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   size_t p = 0;
   memcpy(body + p, head.c_str(), head.length()); p += head.length();
   memcpy(body + p, audio, audioLen); p += audioLen;
-  memcpy(body + p, midA.c_str(), midA.length()); p += midA.length();
-  memcpy(body + p, imgHead.c_str(), imgHead.length()); p += imgHead.length();
-  memcpy(body + p, jpeg, jpegLen); p += jpegLen;
+  if (hasImage) {
+    memcpy(body + p, midA.c_str(), midA.length()); p += midA.length();
+    memcpy(body + p, imgHead.c_str(), imgHead.length()); p += imgHead.length();
+    memcpy(body + p, jpeg, jpegLen); p += jpegLen;
+  }
   memcpy(body + p, tail.c_str(), tail.length()); p += tail.length();
 
   HTTPClient http;
@@ -239,6 +257,12 @@ void fetchAndPlay(const String &audioUrl) {
 }
 
 void handleTurn(bool holdMode) {
+  if (!pcm) {  // PSRAM record buffer never allocated — cannot record
+    Serial.println("[turn] no PSRAM buffer, abort");
+    status("no PSRAM");
+    return;
+  }
+
   status("listening...");
   size_t samples = recordAudio(holdMode);
   if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
@@ -247,18 +271,20 @@ void handleTurn(bool holdMode) {
     return;
   }
 
-  status("capturing...");
+  // Camera is optional: capture a frame when available, otherwise send
+  // audio-only so the voice path can still be exercised.
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
-  if (!cameraOk || !captureJpeg(&jpeg, &jpegLen)) {
-    Serial.println("[turn] camera capture failed");
-    status("camera fail");
-    return;
+  if (cameraOk) {
+    status("capturing...");
+    if (!captureJpeg(&jpeg, &jpegLen)) Serial.println("[turn] capture failed, audio-only");
+  } else {
+    Serial.println("[turn] camera unavailable, audio-only");
   }
 
   status("thinking...");
   String resp = postSee(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
-  free(jpeg);
+  if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
     status("server error");
     return;
@@ -313,7 +339,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v1");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v2 (qspi-psram + i2c-share)");
 
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
   if (!pcm) Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
