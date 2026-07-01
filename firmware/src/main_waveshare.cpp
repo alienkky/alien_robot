@@ -244,7 +244,7 @@ bool setupI2S() {
   return true;
 }
 
-bool setupCamera() {
+camera_config_t makeCameraConfig(int sccbSda, int sccbScl, int sccbPort, int xclkHz) {
   camera_config_t config = {};
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
@@ -262,28 +262,47 @@ bool setupCamera() {
   config.pin_href = CAM_PIN_HREF;
   // Let esp_camera start SCCB after XCLK is running. The OV sensor may not ACK
   // during the boot Wire scan, so keep camera probing independent from ES8311.
-  config.pin_sccb_sda = activeI2cSda;
-  config.pin_sccb_scl = activeI2cScl;
-  config.sccb_i2c_port = 1;
+  config.pin_sccb_sda = sccbSda;
+  config.pin_sccb_scl = sccbScl;
+  config.sccb_i2c_port = sccbPort;
   config.pin_pwdn = CAM_PIN_PWDN;
   config.pin_reset = CAM_PIN_RESET;
-  config.xclk_freq_hz = 12000000;       // xiaozhi profile uses 12 MHz on this board
+  config.xclk_freq_hz = xclkHz;
   config.pixel_format = PIXFORMAT_JPEG;
   config.frame_size = FRAMESIZE_VGA;     // 640×480 — enough for vision, small payload
   config.jpeg_quality = 12;
   config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  return config;
+}
 
-  Serial.printf("[cam] SCCB direct SDA=%d SCL=%d port=%d\n",
-                config.pin_sccb_sda, config.pin_sccb_scl, config.sccb_i2c_port);
+bool tryCameraConfig(const char *label, int sccbSda, int sccbScl, int sccbPort, int xclkHz) {
+  camera_config_t config = makeCameraConfig(sccbSda, sccbScl, sccbPort, xclkHz);
+  Serial.printf("[cam-probe:%s] SCCB SDA=%d SCL=%d port=%d xclk=%d\n",
+                label, config.pin_sccb_sda, config.pin_sccb_scl, config.sccb_i2c_port, config.xclk_freq_hz);
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("[cam] init failed: 0x%x\n", err);
+    Serial.printf("[cam-probe:%s] init failed: 0x%x\n", label, err);
+    esp_camera_deinit();
+    delay(100);
     return false;
   }
-  Serial.println("[cam] OV5640/OV2640 init OK");
+  Serial.printf("[cam] OV5640/OV2640 init OK (%s)\n", label);
   return true;
+}
+
+bool setupCamera() {
+  if (tryCameraConfig("port1-12mhz", activeI2cSda, activeI2cScl, 1, 12000000)) return true;
+  if (tryCameraConfig("port1-20mhz", activeI2cSda, activeI2cScl, 1, 20000000)) return true;
+
+  Wire.end();
+  delay(50);
+  if (tryCameraConfig("port0-12mhz", activeI2cSda, activeI2cScl, 0, 12000000)) return true;
+  if (tryCameraConfig("port0-20mhz", activeI2cSda, activeI2cScl, 0, 20000000)) return true;
+
+  Serial.println("[cam] all probe attempts failed");
+  return false;
 }
 
 // Records until the button is released or the buffer is full. Returns byte count.
