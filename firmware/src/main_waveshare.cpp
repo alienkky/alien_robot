@@ -136,17 +136,35 @@ size_t recordAudio() {
   return total;
 }
 
-// Plays a WAV body: skip the 44-byte header, stream PCM to the I2S DAC.
+// Speaker volume, 0..100 (software scale applied to the PCM before the DAC).
+// Lower = quieter; 100 = original level. Set small (10) for quiet playback.
+constexpr int kSpeakerVolume = 10;
+
+// Plays a WAV body: skip the 44-byte header, scale each sample down to
+// kSpeakerVolume percent, then stream the PCM to the I2S DAC.
 void playWav(const uint8_t *wav, size_t len) {
   if (len <= 44) return;
-  const uint8_t *pcm = wav + 44;
-  size_t pcmLen = len - 44;
-  size_t offset = 0;
-  while (offset < pcmLen) {
-    size_t written = 0;
-    size_t toWrite = min(static_cast<size_t>(1024), pcmLen - offset);
-    if (i2s_write(kI2sPort, pcm + offset, toWrite, &written, pdMS_TO_TICKS(200)) != ESP_OK) break;
-    offset += written;
+  const int16_t *pcm = reinterpret_cast<const int16_t *>(wav + 44);
+  size_t samples = (len - 44) / 2;
+  static int16_t buf[512];
+  size_t i = 0;
+  while (i < samples) {
+    size_t n = min(static_cast<size_t>(512), samples - i);
+    // int32 intermediate avoids 16-bit overflow while scaling.
+    for (size_t k = 0; k < n; k++) {
+      buf[k] = static_cast<int16_t>((static_cast<int32_t>(pcm[i + k]) * kSpeakerVolume) / 100);
+    }
+    size_t off = 0;
+    const size_t bytes = n * 2;
+    while (off < bytes) {
+      size_t written = 0;
+      if (i2s_write(kI2sPort, reinterpret_cast<uint8_t *>(buf) + off, bytes - off,
+                    &written, pdMS_TO_TICKS(200)) != ESP_OK) {
+        return;
+      }
+      off += written;
+    }
+    i += n;
   }
 }
 
