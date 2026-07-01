@@ -38,6 +38,8 @@ constexpr i2s_port_t kI2sPort = I2S_NUM_0;  // ES8311 is full-duplex on one bus
 
 ES8311 codec;
 uint8_t *pcmBuffer = nullptr;
+int activeI2cSda = ES8311_I2C_SDA;
+int activeI2cScl = ES8311_I2C_SCL;
 
 bool i2cWriteReg(uint8_t addr, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(addr);
@@ -55,12 +57,17 @@ bool i2cReadReg(uint8_t addr, uint8_t reg, uint8_t &val) {
   return true;
 }
 
-void setupSharedI2C() {
+void setupSharedI2C(int sdaPin, int sclPin) {
   // xiaozhi's ESP-IDF profile enables internal pull-ups on this shared bus.
   // Without pull-ups, this clone board can report zero devices on SDA8/SCL7.
-  pinMode(ES8311_I2C_SDA, INPUT_PULLUP);
-  pinMode(ES8311_I2C_SCL, INPUT_PULLUP);
-  Wire.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_FREQ);
+  pinMode(sdaPin, INPUT_PULLUP);
+  pinMode(sclPin, INPUT_PULLUP);
+  delay(5);
+  Wire.begin(sdaPin, sclPin, ES8311_I2C_FREQ);
+}
+
+void setupSharedI2C() {
+  setupSharedI2C(activeI2cSda, activeI2cScl);
 }
 
 void waitForSerial() {
@@ -122,8 +129,9 @@ bool initAxp2101() {
 // Codec (ES8311 0x18), touch, and IMU (QMI8658) all live here — if this finds
 // nothing, the I2C pins/power are wrong; if it finds them, the failures are
 // driver-init issues, not the bus. Camera SCCB reuses this same bus.
-void scanI2C(const char *label) {
-  Serial.printf("[i2c-scan:%s] scanning SDA=%d SCL=%d ...\n", label, ES8311_I2C_SDA, ES8311_I2C_SCL);
+int scanI2C(const char *label) {
+  Serial.printf("[i2c-scan:%s] scanning SDA=%d SCL=%d idle=%d/%d ...\n",
+                label, activeI2cSda, activeI2cScl, digitalRead(activeI2cSda), digitalRead(activeI2cScl));
   int found = 0;
   for (uint8_t addr = 1; addr < 127; addr++) {
     Wire.beginTransmission(addr);
@@ -133,6 +141,48 @@ void scanI2C(const char *label) {
     }
   }
   Serial.printf("[i2c-scan:%s] done — %d device(s) on the bus\n", label, found);
+  return found;
+}
+
+int scanI2COnPins(const char *label, int sdaPin, int sclPin) {
+  Wire.end();
+  activeI2cSda = sdaPin;
+  activeI2cScl = sclPin;
+  setupSharedI2C();
+  delay(30);
+  return scanI2C(label);
+}
+
+void discoverI2CBus() {
+  struct Candidate {
+    const char *label;
+    int sda;
+    int scl;
+  };
+
+  const Candidate candidates[] = {
+      {"xiaozhi-3.5b", 8, 7},
+      {"waveshare-4b", 47, 48},
+      {"esp32-3.5", 21, 22},
+      {"swapped-3.5b", 7, 8},
+      {"alt-8-9", 8, 9},
+      {"alt-9-8", 9, 8},
+  };
+
+  Serial.println("[i2c-discover] probing known Waveshare bus candidates");
+  for (const auto &candidate : candidates) {
+    char label[32];
+    snprintf(label, sizeof(label), "probe-%s", candidate.label);
+    int found = scanI2COnPins(label, candidate.sda, candidate.scl);
+    if (found > 0) {
+      Serial.printf("[i2c-discover] selected %s SDA=%d SCL=%d\n",
+                    candidate.label, candidate.sda, candidate.scl);
+      return;
+    }
+  }
+
+  Serial.println("[i2c-discover] no devices found; falling back to xiaozhi-3.5b SDA=8 SCL=7");
+  scanI2COnPins("fallback-xiaozhi-3.5b", ES8311_I2C_SDA, ES8311_I2C_SCL);
 }
 
 void connectWifi() {
@@ -382,9 +432,8 @@ void handleTurn() {
 void setup() {
   Serial.begin(115200);
   waitForSerial();
-  Serial.println("[boot] alien_robot waveshare custom-fw power-v2");
+  Serial.println("[boot] alien_robot waveshare custom-fw i2c-discovery-v3");
   pinMode(PIN_BUTTON, INPUT_PULLUP);
-  setupSharedI2C();
 
   pcmBuffer = static_cast<uint8_t *>(ps_malloc(kMaxPcmBytes));
   if (!pcmBuffer) {
@@ -392,7 +441,7 @@ void setup() {
   }
 
   // xiaozhi powers this board through TCA9554 + AXP2101 before peripherals.
-  scanI2C("pre-power");
+  discoverI2CBus();
   initTca9554();
   initAxp2101();
   delay(200);
@@ -405,7 +454,7 @@ void setup() {
   scanI2C("post-lcd");
 
   // ES8311 must init the shared I2C bus before the camera reuses port 0.
-  codec.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
+  codec.begin(activeI2cSda, activeI2cScl, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
   setupI2S();
   setupCamera();
   connectWifi();
