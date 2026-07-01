@@ -260,10 +260,11 @@ bool setupCamera() {
   config.pin_pclk = CAM_PIN_PCLK;
   config.pin_vsync = CAM_PIN_VSYNC;
   config.pin_href = CAM_PIN_HREF;
-  // SCCB shares the ES8311 I2C bus (port 0) — reuse it instead of own pins.
-  config.pin_sccb_sda = CAM_PIN_SIOD;  // -1
-  config.pin_sccb_scl = CAM_PIN_SIOC;  // -1
-  config.sccb_i2c_port = 0;
+  // Let esp_camera start SCCB after XCLK is running. The OV sensor may not ACK
+  // during the boot Wire scan, so keep camera probing independent from ES8311.
+  config.pin_sccb_sda = activeI2cSda;
+  config.pin_sccb_scl = activeI2cScl;
+  config.sccb_i2c_port = 1;
   config.pin_pwdn = CAM_PIN_PWDN;
   config.pin_reset = CAM_PIN_RESET;
   config.xclk_freq_hz = 12000000;       // xiaozhi profile uses 12 MHz on this board
@@ -274,6 +275,8 @@ bool setupCamera() {
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
 
+  Serial.printf("[cam] SCCB direct SDA=%d SCL=%d port=%d\n",
+                config.pin_sccb_sda, config.pin_sccb_scl, config.sccb_i2c_port);
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("[cam] init failed: 0x%x\n", err);
