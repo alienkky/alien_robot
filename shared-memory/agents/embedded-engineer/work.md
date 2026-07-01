@@ -47,3 +47,13 @@
 - v2(commit 12d4bee) 실기 로그: PSRAM OK(크래시 사라짐), `[rec] 47104 samples`(마이크 OK), `[ui] capturing...`(카메라 GC0308 초기화+촬영 OK, 코드상 cameraOk일 때만 출력), `WiFi connected 10.237.240.3`. → 단말 하드웨어 계층(마이크/카메라/화면/WiFi/멀티파트 전송) 전부 동작.
 - 남은 블로커: `/api/see -> -1 connection refused (timeout 5000ms)`. 순수 서버 미도달(펌웨어 무관). 4090 게이트웨이 미기동 or AI_SERVER_BASE_URL IP:포트 불일치 or 다른 서브넷/방화벽.
 - 대기: 기영님이 (1) AI_SERVER_BASE_URL 값 (2) 4090 게이트웨이 기동+IP (3) 타기기 브라우저 도달 테스트. 서버 확인돼도 refused면 infra-engineer와 포트/바인딩 조율.
+
+## 2026-07-01 — 4090 게이트웨이: 내가 provision + 인프라 Funnel이 이미 라이브
+- 확인: 이 런타임이 4090 자체(hostname ALIEN_4090, RTX4090). E:\alien_robot 직접 접근 가능. [[runtime-is-the-4090]]
+- E:\alien_robot을 M3 브랜치(57014a6)로 업데이트 + backend venv/deps 설치 + .env(토큰 blank) 생성 + uvicorn `/health`={"status":"ok"} 실측. 편의 스크립트 scripts/run_gateway.ps1.
+- 그러나 인프라(남기준)가 이미 **상시 공개 게이트웨이** 완성: Tailscale Funnel `https://alien-4090.taile7f882.ts.net:8443` → :8787. 실측 /health OK, 인프라가 /api/see 왕복 검증. → 내 cloudflared 안내 철회, funnel URL로 정정 코멘트.
+- 펌웨어 v4(d1951ac): X-Device-Token 헤더 전송(embedded pair) + config에 funnel URL 문서화. 빌드 통과.
+- 대기: 기영님 git pull + AI_SERVER_BASE_URL=funnel + 재플래시. 인프라: 인바운드 인증 enforce + 누출 토큰 로테이트.
+
+## mistakes
+- 2026-07-01: 4090의 E: 드라이브를 "못 본다"고 두 번 잘못 답함. 실제론 이 런타임이 4090 자체. → 앞으론 hostname/nvidia-smi로 먼저 확인 후 판단. [[runtime-is-the-4090]]
