@@ -31,3 +31,10 @@
 - Spotpear 형제 보드 2종(OV5640: AXS15231B-QSPI / ST7796)과 별개 — 기영님 건 GC0308 변형.
 - **결론/방향**: 수제 PlatformIO 핀추측 중단. 이 보드는 공식 xiaozhi-esp32(github.com/78/xiaozhi-esp32) 네이티브. 1단계=공식 xiaozhi로 보드 살리기, 2단계=Brain180 /api/see 비전 연동은 별도(인프라 조율, xiaozhi 기본은 WS to xiaozhi-server). m3-board-bringup.md TL;DR과 일치.
 - 대기중: 기영님이 실크 모델명 확인 + Spotpear 자료(원리도/데모펌웨어) 제공 예정.
+
+## 2026-07-01 (3) — CoreS3 실기 첫 플래시: PSRAM 모드 + 카메라 I2C 충돌 (v2로 수정)
+- 증상: Guru Meditation StoreProhibited(EXCVADDR 0x0) 무한 재부팅 + camera 0xffffffff.
+- 원인1 (PSRAM): platformio [common] `board_build.arduino.memory_type=qio_opi`(옥타). CoreS3는 **쿼드(QSPI) PSRAM** → "wrong PSRAM line mode" → ps_malloc null → 녹음버퍼 null 쓰기 크래시. m5stack-cores3.json엔 memory_type 미설정. → cores3 env에 `qio_qspi` 오버라이드 + null 가드.
+- 원인2 (카메라): CoreS3 내부 I2C(포트1 SDA12/SCL11)를 PMIC/코덱/터치/카메라 공유. M5.begin()이 선점 → esp_camera가 포트1 재install 시도 "i2c driver install error". sccb_i2c_port=1 재사용 안 됨(esp32-camera 2.0.4는 무조건 i2c_driver_install). → 패턴: `M5.In_I2C.release()` → esp_camera_init → `i2c_driver_delete(1)` → `M5.In_I2C.begin()`(캡처는 DVP라 SCCB 불요). 실패 시 CAM_SCCB_I2C_PORT=0 시도.
+- 카메라 실패해도 음성 검증되게 postSee 이미지 옵셔널화(오디오-only 전송).
+- 커밋 12d4bee push (branch 9aa2a597). 대기: 기영님 재플래시 새 로그.
