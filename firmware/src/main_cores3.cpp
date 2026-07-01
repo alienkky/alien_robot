@@ -30,6 +30,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>  // TLS for https tunnel URLs (cloudflared/ngrok)
 
 #include "esp_camera.h"
 #include "img_converters.h"  // frame2jpg() — software RGB565 -> JPEG encoder
@@ -176,6 +177,18 @@ void playWav(const uint8_t *wav, size_t len) {
   M5.Speaker.end();
 }
 
+// Begins an HTTP(S) request. For https URLs (free tunnels like cloudflared/
+// ngrok) it uses an insecure TLS client — cert validation is OFF so we don't
+// have to bundle a CA. Fine for a hobby tunnel; do not send secrets you would
+// not accept being MITM'd. `secure`/`plain` must outlive the request.
+bool httpBegin(HTTPClient &http, WiFiClientSecure &secure, WiFiClient &plain, const String &url) {
+  if (url.startsWith("https:")) {
+    secure.setInsecure();
+    return http.begin(secure, url);
+  }
+  return http.begin(plain, url);
+}
+
 // Builds multipart/form-data with the audio PCM and JPEG frame, POSTs /api/see.
 // Returns the response JSON body (empty on failure). Identical contract to the
 // Waveshare firmware so the 4090 gateway is unchanged.
@@ -214,7 +227,9 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   memcpy(body + p, tail.c_str(), tail.length()); p += tail.length();
 
   HTTPClient http;
-  http.begin(String(AI_SERVER_BASE_URL) + "/api/see");
+  WiFiClientSecure secure;
+  WiFiClient plain;
+  httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/see");
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
   int code = http.POST(body, bodyLen);
   String resp;
@@ -232,7 +247,11 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
 void fetchAndPlay(const String &audioUrl) {
   if (audioUrl.isEmpty()) return;
   HTTPClient http;
-  http.begin(String(AI_SERVER_BASE_URL) + audioUrl);
+  WiFiClientSecure secure;
+  WiFiClient plain;
+  // audioUrl may be a full https URL or a path relative to the gateway base.
+  String full = audioUrl.startsWith("http") ? audioUrl : (String(AI_SERVER_BASE_URL) + audioUrl);
+  httpBegin(http, secure, plain, full);
   int code = http.GET();
   if (code == 200) {
     int len = http.getSize();
@@ -339,7 +358,8 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v2 (qspi-psram + i2c-share)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v3 (https tunnel support)");
+  Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
   if (!pcm) Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
