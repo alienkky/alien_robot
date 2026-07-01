@@ -42,3 +42,8 @@
 - platformio.ini: M0 env는 build_src_filter로 분리 보존. 두 env 모두 pio run SUCCESS
   (RAM15.7%/Flash30.5%). esp_camera/I2S/멀티파트 링크 OK.
 - 미검증(실보드): ES8311 레지스터 init·I2S 클럭(드라이버 UNVERIFIED 배너). 카메라 핀은 보드 프로파일 일치.
+
+## 2026-07-01 — CoreS3 route-A 펌웨어 실기 검증 완료 (단말측)
+- v2(commit 12d4bee) 실기 로그: PSRAM OK(크래시 사라짐), `[rec] 47104 samples`(마이크 OK), `[ui] capturing...`(카메라 GC0308 초기화+촬영 OK, 코드상 cameraOk일 때만 출력), `WiFi connected 10.237.240.3`. → 단말 하드웨어 계층(마이크/카메라/화면/WiFi/멀티파트 전송) 전부 동작.
+- 남은 블로커: `/api/see -> -1 connection refused (timeout 5000ms)`. 순수 서버 미도달(펌웨어 무관). 4090 게이트웨이 미기동 or AI_SERVER_BASE_URL IP:포트 불일치 or 다른 서브넷/방화벽.
+- 대기: 기영님이 (1) AI_SERVER_BASE_URL 값 (2) 4090 게이트웨이 기동+IP (3) 타기기 브라우저 도달 테스트. 서버 확인돼도 refused면 infra-engineer와 포트/바인딩 조율.
