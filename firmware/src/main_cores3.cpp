@@ -85,16 +85,101 @@ camera_config_t makeCameraConfig() {
   return c;
 }
 
-// Bottom status line on the CoreS3 display (also mirrored to serial).
-void status(const char *text) {
-  Serial.printf("[ui] %s\n", text);
-  const int h = M5.Display.height();
-  const int w = M5.Display.width();
-  M5.Display.fillRect(0, h - 30, w, 30, TFT_BLACK);
-  M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-  M5.Display.setTextSize(2);
-  M5.Display.setCursor(6, h - 26);
-  M5.Display.print(text);
+// ── Robot face (StackChan-style, drawn with M5GFX) ────────────────────
+// A simple expressive face (cyan eyes + mouth) that reacts to the turn state,
+// plus a Korean-capable status/speech line at the bottom. Drawn into a PSRAM
+// sprite for flicker-free updates. This is deliberately a self-contained custom
+// face (not the m5stack-avatar lib) so it has no background task to fight with
+// the blocking record/HTTP loop and is fully build-verifiable.
+enum Emotion { EMO_NEUTRAL, EMO_LISTEN, EMO_THINK, EMO_HAPPY, EMO_SAD };
+
+M5Canvas *face = nullptr;
+Emotion curEmo = EMO_NEUTRAL;
+char faceText[96] = "";
+
+void drawFace(Emotion e, bool eyesOpen) {
+  if (!face) return;
+  M5Canvas &c = *face;
+  const int w = c.width(), h = c.height();
+  c.fillSprite(TFT_BLACK);
+
+  const uint16_t col = TFT_CYAN;
+  const int eyeY = h / 2 - 24;
+  const int lx = w / 2 - 58, rx = w / 2 + 58;
+  const int er = 30;  // eye radius
+
+  // Eyes — blink collapses them to bars; THINK looks up-right.
+  if (eyesOpen) {
+    c.fillCircle(lx, eyeY, er, col);
+    c.fillCircle(rx, eyeY, er, col);
+    const int pdy = (e == EMO_THINK) ? -12 : 0;
+    const int pdx = (e == EMO_THINK) ? 8 : 0;
+    c.fillCircle(lx + pdx, eyeY + pdy, 12, TFT_BLACK);
+    c.fillCircle(rx + pdx, eyeY + pdy, 12, TFT_BLACK);
+  } else {
+    c.fillRoundRect(lx - er, eyeY - 5, er * 2, 10, 5, col);
+    c.fillRoundRect(rx - er, eyeY - 5, er * 2, 10, 5, col);
+  }
+
+  // Mouth per emotion.
+  const int mx = w / 2, my = eyeY + 78;
+  switch (e) {
+    case EMO_HAPPY:  // upward smile
+      for (int i = -44; i <= 44; i++) c.fillRect(mx + i, my + 14 - (i * i) / 70, 2, 4, col);
+      break;
+    case EMO_SAD:  // downward frown
+      for (int i = -44; i <= 44; i++) c.fillRect(mx + i, my - 14 + (i * i) / 70, 2, 4, col);
+      break;
+    case EMO_THINK:  // small off-centre mouth
+      c.fillCircle(mx + 26, my, 9, col);
+      break;
+    case EMO_LISTEN:  // open (listening)
+      c.fillEllipse(mx, my, 26, 16, col);
+      break;
+    default:  // NEUTRAL
+      c.fillRoundRect(mx - 30, my - 3, 60, 7, 3, col);
+      break;
+  }
+
+  // Status / speech line (Korean-capable font).
+  if (faceText[0]) {
+    c.setFont(&fonts::efontKR_16);
+    c.setTextSize(1);
+    c.setTextColor(TFT_WHITE);
+    c.setCursor(6, h - 20);
+    c.print(faceText);
+    c.setFont(&fonts::Font0);
+  }
+  c.pushSprite(0, 0);
+}
+
+// Set emotion + status/speech text (also mirrored to serial). Replaces status().
+void faceSay(Emotion e, const char *text) {
+  curEmo = e;
+  snprintf(faceText, sizeof(faceText), "%s", text ? text : "");
+  Serial.printf("[ui] %s\n", faceText);
+  drawFace(e, true);
+}
+
+void faceInit() {
+  face = new M5Canvas(&M5.Display);
+  face->setPsram(true);
+  face->createSprite(M5.Display.width(), M5.Display.height());
+  faceSay(EMO_NEUTRAL, "");
+}
+
+// Show the captured frame full-screen for a moment — "what the robot saw".
+void showPhoto(camera_fb_t *fb) {
+  if (!fb || !fb->buf) return;
+  M5.Display.setSwapBytes(true);  // esp_camera RGB565 is byte-swapped vs M5GFX
+  M5.Display.pushImage(0, 0, fb->width, fb->height, reinterpret_cast<const uint16_t *>(fb->buf));
+  M5.Display.setSwapBytes(false);
+  M5.Display.setFont(&fonts::efontKR_16);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setCursor(6, 6);
+  M5.Display.print("이거 봤어요");
+  M5.Display.setFont(&fonts::Font0);
+  delay(1500);
 }
 
 bool setupCamera() {
@@ -116,19 +201,6 @@ bool setupCamera() {
   }
   Serial.println("[cam] GC0308 init OK");
   return true;
-}
-
-// Captures one frame and software-encodes it to JPEG. Caller frees *outJpeg.
-bool captureJpeg(uint8_t **outJpeg, size_t *outLen) {
-  camera_fb_t *fb = esp_camera_fb_get();
-  if (!fb) {
-    Serial.println("[cam] fb_get failed");
-    return false;
-  }
-  bool ok = frame2jpg(fb, kJpegQuality, outJpeg, outLen);
-  esp_camera_fb_return(fb);
-  if (!ok) Serial.println("[cam] frame2jpg failed");
-  return ok;
 }
 
 bool touchPressed() {
@@ -280,57 +352,64 @@ void fetchAndPlay(const String &audioUrl) {
 void handleTurn(bool holdMode) {
   if (!pcm) {  // PSRAM record buffer never allocated — cannot record
     Serial.println("[turn] no PSRAM buffer, abort");
-    status("no PSRAM");
+    faceSay(EMO_SAD, "PSRAM 없음");
     return;
   }
 
-  status("listening...");
+  faceSay(EMO_LISTEN, "듣는 중...");
   size_t samples = recordAudio(holdMode);
   if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
     Serial.println("[turn] too short, skip");
-    status("too short");
+    faceSay(EMO_NEUTRAL, "너무 짧아요");
     return;
   }
 
-  // Camera is optional: capture a frame when available, otherwise send
-  // audio-only so the voice path can still be exercised.
+  // Camera is optional. When available: grab one frame, SHOW it on the display
+  // ("what the robot saw"), then software-encode it to JPEG for the upload.
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
   if (cameraOk) {
-    status("capturing...");
-    if (!captureJpeg(&jpeg, &jpegLen)) Serial.println("[turn] capture failed, audio-only");
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (fb) {
+      showPhoto(fb);  // display the captured photo for ~1.5s
+      if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
+      esp_camera_fb_return(fb);
+    } else {
+      Serial.println("[cam] fb_get failed, audio-only");
+    }
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
 
-  status("thinking...");
+  faceSay(EMO_THINK, "생각 중...");
   String resp = postSee(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
-    status("server error");
+    faceSay(EMO_SAD, "서버 오류");
     return;
   }
 
   JsonDocument doc;
   if (deserializeJson(doc, resp)) {
     Serial.println("[turn] bad JSON response");
-    status("bad json");
+    faceSay(EMO_SAD, "응답 오류");
     return;
   }
   const char *transcript = doc["transcript"] | "";
   const char *answer = doc["answer"] | "";
   const char *audioUrl = doc["audio_url"] | "";
   Serial.printf("[turn] you: %s\n[turn] bot: %s\n", transcript, answer);
-  status(answer[0] ? answer : "(ok)");
+  // Happy face + the spoken answer as the on-screen speech line, while it plays.
+  faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)");
   fetchAndPlay(String(audioUrl));
-  status("ready — hold screen / 't'");
+  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
 }
 
 void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("WiFi connecting");
-  status("wifi...");
+  faceSay(EMO_NEUTRAL, "WiFi 연결 중...");
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
     delay(300);
@@ -340,7 +419,7 @@ void connectWifi() {
     Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
   } else {
     Serial.println("\nWiFi FAILED (check config_cores3.h)");
-    status("wifi FAILED");
+    faceSay(EMO_SAD, "WiFi 실패");
   }
 }
 }  // namespace
@@ -350,18 +429,15 @@ void setup() {
   cfg.internal_mic = true;   // ES7210 dual mic
   cfg.internal_spk = true;   // AW88298 speaker amp
   M5.begin(cfg);             // powers AXP2101/AW9523 rails, display, codecs
-
   M5.Display.setRotation(1);
-  M5.Display.fillScreen(TFT_BLACK);
-  M5.Display.setTextColor(TFT_GREEN, TFT_BLACK);
-  M5.Display.setTextSize(3);
-  M5.Display.setCursor(8, 10);
-  M5.Display.println("ALIEN ROBOT");
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v4 (https + X-Device-Token)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v5 (face + photo display)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
+
+  faceInit();                       // robot face on the LCD
+  faceSay(EMO_NEUTRAL, "부팅 중...");
 
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
   if (!pcm) Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
@@ -369,12 +445,13 @@ void setup() {
   cameraOk = setupCamera();
   connectWifi();
 
-  status("ready — hold screen / 't'");
+  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
   Serial.println("[boot] ready — hold the touch screen, or send 't' over serial, to talk");
 }
 
 void loop() {
   M5.update();
+  static uint32_t lastBlink = 0;
   bool touch = M5.Touch.getDetail().isPressed();
   bool serialTrig = (Serial.available() && Serial.read() == 't');
   if (touch) {
@@ -382,6 +459,12 @@ void loop() {
     while (touchPressed()) delay(10);  // wait for release
   } else if (serialTrig) {
     handleTurn(/*holdMode=*/false);
+  } else if (curEmo == EMO_NEUTRAL && millis() - lastBlink > 3500) {
+    // Idle blink to keep the face alive.
+    drawFace(EMO_NEUTRAL, false);
+    delay(120);
+    drawFace(EMO_NEUTRAL, true);
+    lastBlink = millis();
   }
   delay(10);
 }
