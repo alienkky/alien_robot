@@ -171,7 +171,7 @@ void faceInit() {
 // Show the captured frame full-screen for a moment — "what the robot saw".
 void showPhoto(camera_fb_t *fb) {
   if (!fb || !fb->buf) return;
-  M5.Display.setSwapBytes(true);  // esp_camera RGB565 is byte-swapped vs M5GFX
+  M5.Display.setSwapBytes(CAM_SWAP_BYTES != 0);  // flip in config if colors look wrong
   M5.Display.pushImage(0, 0, fb->width, fb->height, reinterpret_cast<const uint16_t *>(fb->buf));
   M5.Display.setSwapBytes(false);
   M5.Display.setFont(&fonts::efontKR_16);
@@ -198,6 +198,13 @@ bool setupCamera() {
   if (err != ESP_OK) {
     Serial.printf("[cam] init failed 0x%x (try CAM_SCCB_I2C_PORT=0)\n", err);
     return false;
+  }
+  // GC0308 image orientation. Function pointers are null-checked because the
+  // sensor driver only wires up the ops it actually supports.
+  sensor_t *s = esp_camera_sensor_get();
+  if (s) {
+    if (s->set_hmirror) s->set_hmirror(s, CAM_HMIRROR);
+    if (s->set_vflip) s->set_vflip(s, CAM_VFLIP);
   }
   Serial.println("[cam] GC0308 init OK");
   return true;
@@ -433,7 +440,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v5 (face + photo display)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v6 (image tuning: swap/mirror)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD

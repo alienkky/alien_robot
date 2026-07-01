@@ -29,3 +29,12 @@
 // releasing it, so touch + the ES7210/AW88298 audio codecs keep working.
 // If `esp_camera_init` fails with 0x105 (NOT_FOUND) on hardware, try 0.
 #define CAM_SCCB_I2C_PORT 1
+
+// Camera image tuning (GC0308, 0.3MP). The on-screen photo is 320x240 (native
+// to the LCD). If colors look WRONG (red<->blue swapped / tinted), flip
+// CAM_SWAP_BYTES between 1 and 0 — that is the usual "weird image" cause and
+// needs no code change, just re-flash. The front camera is mirrored, so
+// CAM_HMIRROR=1 makes a selfie look natural; set CAM_VFLIP=1 if it is upside down.
+#define CAM_SWAP_BYTES 1
+#define CAM_HMIRROR    1
+#define CAM_VFLIP      0
