@@ -17,6 +17,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <Wire.h>
 #include <driver/i2s.h>
 #include "esp_camera.h"
 
@@ -37,6 +38,24 @@ constexpr i2s_port_t kI2sPort = I2S_NUM_0;  // ES8311 is full-duplex on one bus
 
 ES8311 codec;
 uint8_t *pcmBuffer = nullptr;
+
+// Boot diagnostic: probe every address on the shared I2C bus (SDA=8, SCL=7).
+// Codec (ES8311 0x18), touch, and IMU (QMI8658) all live here — if this finds
+// nothing, the I2C pins/power are wrong; if it finds them, the failures are
+// driver-init issues, not the bus. Camera SCCB reuses this same bus.
+void scanI2C() {
+  Wire.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_FREQ);
+  Serial.printf("[i2c-scan] scanning SDA=%d SCL=%d ...\n", ES8311_I2C_SDA, ES8311_I2C_SCL);
+  int found = 0;
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      Serial.printf("[i2c-scan] found device 0x%02X\n", addr);
+      found++;
+    }
+  }
+  Serial.printf("[i2c-scan] done — %d device(s) on the bus\n", found);
+}
 
 void connectWifi() {
   WiFi.mode(WIFI_STA);
@@ -296,6 +315,9 @@ void setup() {
   // init fails). Uses QSPI pins separate from the audio I2C / camera DVP buses.
   display_begin();
   display_boot();
+
+  // Diagnostic: what actually answers on the shared I2C bus? (codec/touch/IMU)
+  scanI2C();
 
   // ES8311 must init the shared I2C bus before the camera reuses port 0.
   codec.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
