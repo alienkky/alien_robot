@@ -22,6 +22,7 @@
 
 #include "config_waveshare.h"
 #include "es8311.h"
+#include "display.h"
 
 #ifndef I2S_COMM_FORMAT_STAND_I2S
 #define I2S_COMM_FORMAT_STAND_I2S I2S_COMM_FORMAT_I2S
@@ -46,6 +47,9 @@ void connectWifi() {
     Serial.print(".");
   }
   Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
+  char line[40];
+  snprintf(line, sizeof(line), "IP %s", WiFi.localIP().toString().c_str());
+  display_status(line);
 }
 
 // Full-duplex I2S master: MCLK feeds the ES8311 (256×fs), DIN=mic, DOUT=spk.
@@ -241,21 +245,28 @@ void fetchAndPlay(const String &audioUrl) {
 }
 
 void handleTurn() {
+  display_status("listening...");
   size_t audioLen = recordAudio();
   if (audioLen < kSampleRate) {  // < ~0.25s → ignore accidental taps
     Serial.println("[turn] too short, skip");
+    display_status("too short");
     return;
   }
 
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
     Serial.println("[turn] camera capture failed");
+    display_status("camera fail");
     return;
   }
 
+  display_status("thinking...");
   String resp = postSee(pcmBuffer, audioLen, fb->buf, fb->len);
   esp_camera_fb_return(fb);
-  if (resp.isEmpty()) return;
+  if (resp.isEmpty()) {
+    display_status("server error");
+    return;
+  }
 
   JsonDocument doc;
   if (deserializeJson(doc, resp)) {
@@ -267,6 +278,7 @@ void handleTurn() {
   const char *audioUrl = doc["audio_url"] | "";
   Serial.printf("[turn] you: %s\n[turn] bot: %s\n", transcript, answer);
   fetchAndPlay(String(audioUrl));
+  display_status("ready");
 }
 }  // namespace
 
@@ -279,6 +291,11 @@ void setup() {
   if (!pcmBuffer) {
     Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
   }
+
+  // Stage 1 display bring-up (non-fatal: the voice loop runs even if the panel
+  // init fails). Uses QSPI pins separate from the audio I2C / camera DVP buses.
+  display_begin();
+  display_boot();
 
   // ES8311 must init the shared I2C bus before the camera reuses port 0.
   codec.begin(ES8311_I2C_SDA, ES8311_I2C_SCL, ES8311_I2C_ADDR, ES8311_I2C_FREQ, kSampleRate);
