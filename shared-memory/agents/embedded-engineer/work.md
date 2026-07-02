@@ -103,3 +103,10 @@
 - 원인: esp_camera_deinit()이 공유 I2C(port1) wedge -> 다음 loop M5.update() FT6336 터치 I2C read가 블록 -> 루프 정지. 워치독 꺼서(esp_task_wdt_deinit) 리부트도 안됨 -> 영구 먹통. v21~23 캡처성공+마이크생존이 이걸 가림(터치/루프가 진짜 피해자).
 - v24: CAM_ENABLE=0 복귀 -> 음성루프+터치+볼륨2x 안정. lessons 문서에 프리즈 메커니즘+재활성 전 증명해야할 deinit 버스복구 절차 기록. pio SUCCESS. 커밋 afba4d5.
 - 교훈: "카메라 turn 성공"≠"안정". 캡처 로그 다음의 터치재동작+health지속까지 확인해야 진짜 안정. 워치독 끈 상태선 I2C hang=영구먹통.
+
+##  — 카메라 프리즈 정면돌파: I2C bus recovery (v26, 카메라 ON)
+- 유저: 카메라 끄지 말고 오류 안나게 만들라(핵심기능). 맞는 말 -> 프리즈 메커니즘 자체를 고침.
+- 프리즈 원인: esp_camera_deinit()이 공유 I2C(port1) wedge -> 다음 터치 read가 루프 stall -> 워치독 없어서 영구먹통.
+- v26: recoverSharedI2C() 신설(deinit 직후 호출). release+i2c_driver_delete -> 비트뱅 SCL 9펄스로 stuck slave 클럭아웃+STOP(교과서 bus recovery) -> M5.In_I2C.begin(). 터치/오디오가 깨끗한 버스 회수 -> 루프 hang 불가. 카메라는 여전히 record 이후 on-demand. CAM_ENABLE=1 복귀. pio SUCCESS. 커밋 82b33ca.
+- 판별 로그: [cam] shared I2C recovered 다음 턴 터치 재동작+health 지속 = 성공. 그래도 프리즈면 다음카드=카메라 구간 워치독(Task WDT ~10s, 애니루프 feed)로 hang시 자동리부트.
+- 비트뱅 핀 12(SDA)/11(SCL), OUTPUT_OPEN_DRAIN. PMIC/코덱 같은 버스지만 클럭아웃은 표준·안전.
