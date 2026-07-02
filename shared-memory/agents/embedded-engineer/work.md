@@ -90,3 +90,10 @@
 - v21 설계: 부팅 프로브 제거. 카메라는 handleTurn에서 recordAudio 이후에만 on-demand init. detect방식 복귀(자체 SCCB 드라이버 설치=센서 탐지 가능), orient설정후 i2c_driver_delete+M5.In_I2C.begin()으로 버스 반환. 마이크는 항상 깨끗한 버스에서 먼저 녹음 -> 카메라 실패해도 그 턴 이미지만 손해. [cam] captured WxH->jpeg N 로그 추가.
 - CAM_ENABLE=1 복귀, CAM_ENABLE 0 즉시폴백 유지. pio SUCCESS. 커밋 2616721.
 - 판별 로그(다음): [cam] GC0308 init OK / captured / 그 다음 턴 [mic] peak>0 유지 여부 / 터치 유지. 하나라도 깨지면 동시사용 불가 -> 모드분리 설계로.
+
+##  — v21 카메라 공존 성공, 진짜 병목=서버 지연 (v22 타임아웃 상향)
+- v21 실기: mic peak=2620/71 (양 턴 생존), [cam] GC0308 init OK ×2, captured 320x240 jpeg 6880/7945 bytes. **카메라+마이크 공존 성공** (v18 회귀 해결). 순서(record먼저→camera나중, 부팅프로브 제거)가 정답이었음.
+- 진짜 문제: /api/see -> -11 (62266ms) = 비전 요청 62초 걸려 60초 read timeout 초과(2초 차). 서버가 죽은게 아니라 느린 것. 오디오전용도 39초였음. => 서버 지연이 UX 병목, 인프라 건.
+- v22: postSee 타임아웃 60s->120s(느린 비전 완료되게), 생각중 얼굴에 경과초 카운터(멈춘것처럼 안보이게), -11 전용 메시지("서버가 느려요"). pio SUCCESS. 커밋 ccd8c4f.
+- i2c_driver_delete/gdma_disconnect 에러들은 온디맨드 카메라의 정상 노이즈(캡처·마이크 다 동작). 무해.
+- 남은건 서버 39-62초 추론 지연 = infra. 언어혼입(중국어)도 infra 메시지 전달함.
