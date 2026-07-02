@@ -45,6 +45,16 @@
 // Optional camera tuning knobs default here, so an older config_cores3.h that
 // predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
 // truly required). Override any of these in config_cores3.h to change them.
+// Master camera switch. The GC0308 SCCB shares CoreS3's ONE internal I2C bus
+// (port 1) with the FT6336 touch panel AND the ES7210/AW88298 audio codecs.
+// esp_camera_init()/deinit() tear that bus down and rebuild it every turn, and
+// on hardware that left the touch panel dead after the first turn ("화면 터치
+// 동작 안 함"). Default OFF = audio-only so touch + mic stay rock-solid while we
+// stabilise the voice loop; set CAM_ENABLE 1 in config_cores3.h to bring the
+// camera back once the bus handoff is proven on the board.
+#ifndef CAM_ENABLE
+#define CAM_ENABLE 0
+#endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
 #endif
@@ -590,6 +600,11 @@ void handleTurn(bool holdMode) {
       Serial.println("[cam] fb_get failed, audio-only");
     }
     esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
+    // esp_camera_deinit() drops the SCCB driver on the shared internal I2C bus
+    // (port 1) that also drives the FT6336 touch panel + audio codecs. Without
+    // re-establishing M5's ownership the touch panel goes dead after a turn
+    // ("잘 안 들렸어요" 화면에서 터치 무반응). Re-begin M5's bus so touch keeps working.
+    M5.In_I2C.begin();
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
@@ -661,7 +676,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v16 (mic: continuous DMA feed + peak/raw diag)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v17 (camera OFF by default — keep touch/mic alive)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
@@ -692,11 +707,17 @@ void setup() {
   // Probe the camera once, then DEINIT so cam_task is not running at idle
   // (continuous cam_task overflows its stack -> reboot). It is re-inited on
   // demand for each capture in handleTurn().
+#if CAM_ENABLE
   cameraOk = setupCamera();
   if (cameraOk) {
     esp_camera_deinit();
+    M5.In_I2C.begin();  // give the shared I2C bus (touch/audio) back to M5
     Serial.println("[cam] on-demand mode (idle camera off)");
   }
+#else
+  cameraOk = false;
+  Serial.println("[cam] disabled (CAM_ENABLE=0) — audio-only, touch/mic first");
+#endif
   connectWifi();
 
   faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
