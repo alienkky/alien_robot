@@ -44,3 +44,10 @@
 - 서버 `/api/see 422` = STT "No speech detected"(backend/app.py:94). 이미지/포맷 문제 아님 — 무음 오디오가 원인.
 - I2C `i2c_driver_delete/SCCB` 에러 + `i2s_driver_uninstall port1 not installed`는 카메라 온디맨드 init + 첫 Speaker.end() 정상로그(무해).
 - M5Unified 마이크: record()는 비동기 더블버퍼. per-chunk isRecording() busy-wait는 첫 버퍼 미충전 위험 -> 연속 피드 후 끝에서 1회 drain이 권장 패턴.
+## 2026-07-03 - /api/see text vs image failure split
+- For ALI-21, `/health` and text-only `/api/see` can be fast/healthy while image-attached `/api/see` fails. Do not diagnose "server slow" from gateway reachability alone.
+- Current observed split: health ~66 ms, text-only `/api/see` ~5.2 s, image `/api/see` -> 502 with local vLLM 400.
+- When camera is re-enabled in firmware, "worked just now" may flip because the request path changes from text/audio-only to multimodal local-vLLM vision.
+## 2026-07-03 - Watchdog is required for CoreS3 camera/touch recovery
+- For CoreS3 camera experiments, leaving `esp_task_wdt_deinit()` in production firmware hides real I2C/touch wedges as permanent freezes. Keep a watched loop task and feed only known-good long loops.
+- For `/api/see`, a UI animation loop can keep the board alive while the HTTP task runs, but a hard upper bound is still needed. If the background request never returns, reboot deliberately rather than preserving dangling audio/jpeg pointers.

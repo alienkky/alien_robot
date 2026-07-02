@@ -84,3 +84,10 @@ CoreS3는 **내부 I2C 버스(port 1) 하나**를 다음이 공유한다:
 
 - **Windows 권한**: `.git`·`.platformio` 폴더가 관리자 권한으로 생성됨 → 일반 PowerShell에서 `Permission denied`(git reflog append / esptool intelhex 읽기). **관리자 PowerShell**에서 실행하면 통과. 근본 해결은 `takeown`/`icacls`로 소유권 정리.
 - `git reset --hard` 막힐 때: `git config core.logAllRefUpdates false` 로 reflog 기록만 잠깐 끄면 우회 가능.
+### v27 — 서버 타임아웃 후 먹통 방지: 워치독 + 실패 경로 I2C 재복구
+사용자 재현: `서버가 느려요`가 뜬 뒤 다시 터치해도 먹통. v26의 I2C 복구만으로는 서버 실패/타임아웃 뒤 idle 복귀 직전까지 완전히 안전하다고 볼 수 없음.
+- `esp_task_wdt_deinit()` 제거, loop task watchdog 재활성화. 터치/I2C read가 다시 block되면 영구 먹통 대신 `TASK_WDT` 리셋으로 복구.
+- 정상 장시간 루프(record, thinking animation, volume panel, audio playback, Wi-Fi connect)에 `feedWatchdog()` 추가.
+- `/api/see` 백그라운드 task가 135초를 넘기면 `ESP.restart()`로 강제 복구. HTTP read timeout 120초보다 여유를 둔 hard limit.
+- `resp.isEmpty()` / bad JSON / 성공 후 playback 종료 시점에 `recoverSharedI2C()`를 한 번 더 호출해서 idle 복귀 전 touch bus를 재정리.
+- 기대 로그: 부팅 `route-A v27`, `[wdt] armed (12s)`. 만약 여전히 멈추면 다음 부팅 `last reset reason = TASK_WDT (watchdog)`가 찍혀 영구 먹통 대신 자동복구됨을 확인.

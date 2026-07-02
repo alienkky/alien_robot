@@ -110,3 +110,14 @@
 - v26: recoverSharedI2C() 신설(deinit 직후 호출). release+i2c_driver_delete -> 비트뱅 SCL 9펄스로 stuck slave 클럭아웃+STOP(교과서 bus recovery) -> M5.In_I2C.begin(). 터치/오디오가 깨끗한 버스 회수 -> 루프 hang 불가. 카메라는 여전히 record 이후 on-demand. CAM_ENABLE=1 복귀. pio SUCCESS. 커밋 82b33ca.
 - 판별 로그: [cam] shared I2C recovered 다음 턴 터치 재동작+health 지속 = 성공. 그래도 프리즈면 다음카드=카메라 구간 워치독(Task WDT ~10s, 애니루프 feed)로 hang시 자동리부트.
 - 비트뱅 핀 12(SDA)/11(SCL), OUTPUT_OPEN_DRAIN. PMIC/코덱 같은 버스지만 클럭아웃은 표준·안전.
+## 2026-07-03 - ALI-21 server-slow investigation
+- User reported "server is slow; things that worked just now keep failing" after v26 camera-on.
+- Checked current branch: v26 kept `/api/see` read timeout at 120s; not a firmware timeout regression.
+- Remote gateway health via Python/OpenSSL: 200 in ~66 ms. Text-only `/api/see` with dummy audio+text: 200 in ~5.2 s.
+- Image-attached `/api/see` reproduced 502 quickly with detail: `local vLLM request failed: 400 Bad Request` at `http://127.0.0.1:8000/v1/chat/completions`.
+- Conclusion: failure is isolated to the camera/image vision path after v26, not gateway reachability. Sent infra message `20260703-0515-embedded-engineer-to-infra-engineer-ali21-vision-vllm-400.md`.
+## 2026-07-03 - ALI-21 v27 timeout-freeze recovery
+- User clarified: when the screen says "server is slow", the robot becomes unresponsive after that.
+- Implemented v27 in `firmware/src/main_cores3.cpp`: re-enable task watchdog, feed it in normal long loops, hard restart `/api/see` if the background request exceeds 135s, and run a final `recoverSharedI2C()` on empty response/bad JSON/success before returning idle.
+- Boot log now says `route-A v27 (timeout recovery + watchdog)`. Expected if hang recurs: automatic reboot with `last reset reason = TASK_WDT`, not permanent freeze.
+- Build not run in this runtime: no `pio` executable and no `platformio` Python module installed.

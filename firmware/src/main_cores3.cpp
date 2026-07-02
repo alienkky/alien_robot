@@ -40,7 +40,7 @@
 #include "driver/i2c.h"      // i2c_driver_delete() — hand the SCCB bus back to M5
 #include "soc/soc.h"          // brownout detector register
 #include "soc/rtc_cntl_reg.h"
-#include "esp_task_wdt.h"     // disable task watchdog (avoid WDT reboots)
+#include "esp_task_wdt.h"     // recover from hard hangs instead of staying frozen
 #include "esp_system.h"       // esp_reset_reason() — log why it last rebooted
 
 #include "config_cores3.h"
@@ -82,9 +82,27 @@ constexpr uint8_t kDefaultVolume = 160; // 0..255 default (2x the original 80)
 uint8_t g_speakerVolume = kDefaultVolume; // runtime, user-adjustable via the panel
 Preferences g_prefs;                      // NVS store — persists the volume
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
+constexpr uint32_t kWatchdogTimeoutSec = 12;      // hard hang -> automatic reboot
+constexpr uint32_t kSeeHardRestartMs = 135000UL;  // HTTP timeout is 120s + margin
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
+
+void feedWatchdog() {
+  esp_task_wdt_reset();
+}
+
+void armLoopWatchdog() {
+  esp_err_t err = esp_task_wdt_init(kWatchdogTimeoutSec, true);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    Serial.printf("[wdt] init failed 0x%x\n", static_cast<unsigned>(err));
+  }
+  err = esp_task_wdt_add(nullptr);  // watch the Arduino loop task
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+    Serial.printf("[wdt] add loop task failed 0x%x\n", static_cast<unsigned>(err));
+  }
+  Serial.printf("[wdt] armed (%lus)\n", static_cast<unsigned long>(kWatchdogTimeoutSec));
+}
 
 // ── Camera: M5Stack CoreS3 GC0308 (DVP) ───────────────────────────────
 // Pin values verified against the M5Stack StackChan/CoreS3 GC0308 example
@@ -278,6 +296,7 @@ void animateMouthWhilePlaying(uint32_t durationMs) {
   uint32_t lastMouth = 0;
   bool open = false;
   while (M5.Speaker.isPlaying()) {
+    feedWatchdog();
     const uint32_t el = millis() - startT;
     int reveal = (durationMs > 0) ? static_cast<int>((uint64_t)total * el / durationMs) : total;
     if (reveal > total) reveal = total;
@@ -380,6 +399,7 @@ void showVolumeControl() {
   uint32_t lastAct = millis();
   while (true) {
     M5.update();
+    feedWatchdog();
     auto d = M5.Touch.getDetail();
     if (d.wasPressed()) {
       const int x = d.x, y = d.y;
@@ -543,6 +563,7 @@ size_t recordAudio(bool holdMode) {
   // start-up — potentially leaving the first buffers unfilled, a candidate for
   // the all-zero recording. We drain the last queued buffers once, after loop.
   while (total + kRecordChunk <= kMaxSamples) {
+    feedWatchdog();
     if (!M5.Mic.record(pcm + total, kRecordChunk, kSampleRate)) {
       delay(1);            // double-buffer full — let it flush, then retry
       continue;
@@ -550,7 +571,10 @@ size_t recordAudio(bool holdMode) {
     total += kRecordChunk;
     if (holdMode && !touchPressed()) break;
   }
-  while (M5.Mic.isRecording()) delay(1);  // let the last queued chunk(s) finish
+  while (M5.Mic.isRecording()) {
+    feedWatchdog();
+    delay(1);
+  }  // let the last queued chunk(s) finish
   M5.Mic.end();
   Serial.printf("[rec] %u samples\n", static_cast<unsigned>(total));
   return total;
@@ -716,6 +740,12 @@ String postSeeThinking(const uint8_t *audio, size_t audioLen,
   uint32_t shownSec = 999;
   while (!job.done) {
     const uint32_t el = millis() - t0;
+    if (el > kSeeHardRestartMs) {
+      Serial.println("[wdt] /api/see stuck past hard limit; restarting");
+      delay(100);
+      ESP.restart();
+    }
+    feedWatchdog();
     // Live elapsed-seconds counter so a slow server (vision can take ~1 min)
     // reads as "working", not "frozen". Updated once per second into faceText,
     // which drawFace shows as the bottom status line.
@@ -755,6 +785,7 @@ void fetchAndPlay(const String &audioUrl) {
         WiFiClient *stream = http.getStreamPtr();
         int got = 0;
         while (http.connected() && got < len) {
+          feedWatchdog();
           int avail = stream->available();
           if (avail > 0) got += stream->readBytes(wav + got, min(avail, len - got));
           else delay(1);
@@ -818,6 +849,8 @@ void handleTurn(bool holdMode) {
   String resp = postSeeThinking(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
+    Serial.println("[turn] empty response; recovering I2C before idle");
+    if (cameraOk) recoverSharedI2C();
     // Friendly, specific messages instead of a scary "server error".
     if (g_seeCode == 422) faceSay(EMO_NEUTRAL, "잘 안 들렸어요, 다시 말해줘");
     else if (g_seeCode == 400) faceSay(EMO_NEUTRAL, "너무 짧아요, 길게 말해줘");
@@ -830,6 +863,7 @@ void handleTurn(bool holdMode) {
   JsonDocument doc;
   if (deserializeJson(doc, resp)) {
     Serial.println("[turn] bad JSON response");
+    if (cameraOk) recoverSharedI2C();
     faceSay(EMO_SAD, "응답 오류");
     return;
   }
@@ -840,6 +874,7 @@ void handleTurn(bool holdMode) {
   // Happy face + speech bubble (only now, while talking) with the answer.
   faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
   fetchAndPlay(String(audioUrl));
+  if (cameraOk) recoverSharedI2C();
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
@@ -853,6 +888,7 @@ void connectWifi() {
   faceSay(EMO_NEUTRAL, "WiFi 연결 중...");
   uint32_t start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+    feedWatchdog();
     delay(300);
     Serial.print(".");
   }
@@ -882,7 +918,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v26 (camera ON + I2C bus-recovery = no freeze)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v27 (timeout recovery + watchdog)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -906,8 +942,9 @@ void setup() {
   }
   Serial.printf("[boot] last reset reason = %s\n", rr);
 
-  // Take this task off the watchdog so nothing here can trigger a WDT reboot.
-  esp_task_wdt_deinit();
+  // Watch the loop task. If touch/I2C wedges again, reboot instead of staying
+  // permanently frozen until power-cycled.
+  armLoopWatchdog();
 
   faceInit();                       // robot face on the LCD
   faceSay(EMO_NEUTRAL, "부팅 중...");
@@ -936,6 +973,7 @@ void setup() {
 
 void loop() {
   M5.update();
+  feedWatchdog();
   static uint32_t lastBlink = 0;
   static uint32_t lastWifiChk = 0;
   static uint32_t lastHealth = 0;
@@ -965,6 +1003,7 @@ void loop() {
       bool swiped = false;
       while (true) {
         M5.update();
+        feedWatchdog();
         auto d = M5.Touch.getDetail();
         if (!d.isPressed()) break;
         if (d.distanceY() > 50) { swiped = true; break; }
@@ -972,7 +1011,10 @@ void loop() {
       }
       if (swiped) {
         showBattery();
-        while (touchPressed()) delay(10);  // consume the rest of the gesture
+        while (touchPressed()) {
+          feedWatchdog();
+          delay(10);
+        }  // consume the rest of the gesture
       }
       // released at the top without swiping -> ignore (not a talk trigger)
     } else if (td.base_y > 200) {
@@ -980,6 +1022,7 @@ void loop() {
       bool swiped = false;
       while (true) {
         M5.update();
+        feedWatchdog();
         auto d = M5.Touch.getDetail();
         if (!d.isPressed()) break;
         if (d.distanceY() < -50) { swiped = true; break; }
@@ -987,12 +1030,18 @@ void loop() {
       }
       if (swiped) {
         showVolumeControl();
-        while (touchPressed()) delay(10);  // consume the rest of the gesture
+        while (touchPressed()) {
+          feedWatchdog();
+          delay(10);
+        }  // consume the rest of the gesture
       }
       // tap at the bottom without swiping up -> ignore (not a talk trigger)
     } else {
       handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
-      while (touchPressed()) delay(10);     // wait for release
+      while (touchPressed()) {
+        feedWatchdog();
+        delay(10);
+      }     // wait for release
     }
   } else if (serialCmd == 'b') {
     showBattery();                          // serial 'b' = show battery (testing)
