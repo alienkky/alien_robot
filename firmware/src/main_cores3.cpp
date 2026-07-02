@@ -37,6 +37,8 @@
 #include "driver/i2c.h"      // i2c_driver_delete() — hand the SCCB bus back to M5
 #include "soc/soc.h"          // brownout detector register
 #include "soc/rtc_cntl_reg.h"
+#include "esp_task_wdt.h"     // disable task watchdog (avoid WDT reboots)
+#include "esp_system.h"       // esp_reset_reason() — log why it last rebooted
 
 #include "config_cores3.h"
 
@@ -559,8 +561,27 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v11 (streaming caption scroll)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v12 (reset-reason log + no WDT)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
+
+  // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
+  // PANIC = code crash, BROWNOUT = power sag, TASK_WDT/INT_WDT = watchdog.
+  const char *rr = "?";
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  rr = "POWERON (normal)"; break;
+    case ESP_RST_SW:       rr = "SW"; break;
+    case ESP_RST_PANIC:    rr = "PANIC (code crash)"; break;
+    case ESP_RST_INT_WDT:  rr = "INT_WDT (watchdog)"; break;
+    case ESP_RST_TASK_WDT: rr = "TASK_WDT (watchdog)"; break;
+    case ESP_RST_WDT:      rr = "WDT (watchdog)"; break;
+    case ESP_RST_BROWNOUT: rr = "BROWNOUT (power sag)"; break;
+    case ESP_RST_EXT:      rr = "EXT"; break;
+    default:               rr = "OTHER"; break;
+  }
+  Serial.printf("[boot] last reset reason = %s\n", rr);
+
+  // Take this task off the watchdog so nothing here can trigger a WDT reboot.
+  esp_task_wdt_deinit();
 
   faceInit();                       // robot face on the LCD
   faceSay(EMO_NEUTRAL, "부팅 중...");
@@ -579,6 +600,17 @@ void loop() {
   M5.update();
   static uint32_t lastBlink = 0;
   static uint32_t lastWifiChk = 0;
+  static uint32_t lastHealth = 0;
+  // Heap/uptime trend — a steadily falling heap means a leak (crash after a
+  // while); a sudden reboot with heap still high points at power/watchdog.
+  if (millis() - lastHealth > 30000) {
+    lastHealth = millis();
+    Serial.printf("[health] up=%lus heap=%u psram=%u wifi=%d\n",
+                  static_cast<unsigned long>(millis() / 1000),
+                  static_cast<unsigned>(ESP.getFreeHeap()),
+                  static_cast<unsigned>(ESP.getFreePsram()),
+                  WiFi.status() == WL_CONNECTED ? 1 : 0);
+  }
   // Recover from idle WiFi drops without rebooting.
   if (millis() - lastWifiChk > 8000) {
     lastWifiChk = millis();
