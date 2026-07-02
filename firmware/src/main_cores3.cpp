@@ -47,18 +47,15 @@
 // Optional camera tuning knobs default here, so an older config_cores3.h that
 // predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
 // truly required). Override any of these in config_cores3.h to change them.
-// Master camera switch — default OFF. HARD-LEARNED on hardware (see
-// docs/lessons-cores3.md): ANY esp_camera_init() on the shared internal I2C bus
-// (port 1) — even the reuse path, even a probe that then fails — leaves the
-// ES7210 mic silent (peak=0, enabled=1 but no samples). The mic only captures
-// (peak>0) with the camera fully OFF. The old release()/i2c_driver_delete() path
-// additionally killed the FT6336 touch. So the camera and the working voice loop
-// cannot share this bus with the current design. Keep this 0 until a mic-safe
-// camera bring-up is PROVEN on the board; do not flip it on in a build that also
-// touches the voice loop. Set CAM_ENABLE 1 in config_cores3.h only for isolated
-// camera experiments.
+// Master camera switch — ON. Camera is inited strictly ON-DEMAND inside
+// handleTurn AFTER recordAudio() (never at boot), with a full I2C hand-back to
+// M5 after each capture (see setupCamera + docs/lessons-cores3.md). This ordering
+// is the mic-safe design: the mic always records on a clean bus first, so a
+// camera hiccup can only cost a single turn's image, not the voice loop. If your
+// board still shows [mic] peak=0 AFTER a camera turn, set CAM_ENABLE 0 in
+// config_cores3.h to instantly fall back to the proven audio-only loop.
 #ifndef CAM_ENABLE
-#define CAM_ENABLE 0
+#define CAM_ENABLE 1
 #endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
@@ -345,29 +342,37 @@ void showPhoto(camera_fb_t *fb) {
   delay(1500);
 }
 
+// Detect-capable, mic-safe camera bring-up. CoreS3 shares ONE internal I2C bus
+// (port 1) across the AXP2101 PMIC, ES7210 mic / AW88298 speaker codecs, FT6336
+// touch AND the GC0308 SCCB. Hard-won on hardware (docs/lessons-cores3.md):
+//   • The "reuse M5's driver" path (v18) could NOT probe the sensor AND left the
+//     mic silent — worst case. So we go back to letting esp_camera_init install
+//     its OWN SCCB driver, which actually detects the GC0308.
+//   • SCCB is only needed to CONFIGURE the sensor, not to grab DVP frames. So
+//     right after init we set orientation, delete the camera's SCCB driver, and
+//     hand port 1 back to M5 — touch + audio keep the bus for the rest of the turn.
+//   • This is only ever called from handleTurn AFTER recordAudio(), never at boot,
+//     so a camera hiccup can never poison the mic for a whole session, and the
+//     current turn's audio is already captured before we touch the bus.
 bool setupCamera() {
   camera_config_t c = makeCameraConfig();
-  // TRUE SCCB bus reuse. CoreS3 shares ONE internal I2C bus (port 1) across the
-  // AXP2101 PMIC, ES7210/AW88298 codecs, FT6336 touch AND the camera SCCB.
-  // Because c.sccb_i2c_port is set, esp_camera_init() talks to the GC0308 over
-  // M5's ALREADY-installed driver instead of installing its own — so we do NOT
-  // release or delete M5's bus. The old release()/i2c_driver_delete() dance is
-  // exactly what left the touch panel dead after a turn; removing it means the
-  // shared bus is never torn down, and if the sensor probe fails we simply fall
-  // back to audio-only with touch + mic completely unaffected.
+  M5.In_I2C.release();                    // free port 1 so the camera can probe SCCB
   esp_err_t err = esp_camera_init(&c);
+  if (err == ESP_OK) {
+    // Orientation must be written while the camera's SCCB driver is still alive.
+    sensor_t *s = esp_camera_sensor_get();
+    if (s) {
+      if (s->set_hmirror) s->set_hmirror(s, CAM_HMIRROR);
+      if (s->set_vflip) s->set_vflip(s, CAM_VFLIP);
+    }
+  }
+  i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));
+  M5.In_I2C.begin();                      // M5 reclaims the shared bus, pass or fail
   if (err != ESP_OK) {
-    Serial.printf("[cam] init failed 0x%x — audio-only (touch/mic unaffected)\n", err);
+    Serial.printf("[cam] init failed 0x%x — audio-only this turn (try CAM_SCCB_I2C_PORT=0)\n", err);
     return false;
   }
-  // GC0308 image orientation. Function pointers are null-checked because the
-  // sensor driver only wires up the ops it actually supports.
-  sensor_t *s = esp_camera_sensor_get();
-  if (s) {
-    if (s->set_hmirror) s->set_hmirror(s, CAM_HMIRROR);
-    if (s->set_vflip) s->set_vflip(s, CAM_VFLIP);
-  }
-  Serial.println("[cam] GC0308 init OK (shared I2C reuse, no bus teardown)");
+  Serial.println("[cam] GC0308 init OK");
   return true;
 }
 
@@ -655,6 +660,9 @@ void handleTurn(bool holdMode) {
     if (fb) {
       showPhoto(fb);  // display the captured photo for ~1.5s
       if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
+      Serial.printf("[cam] captured %ux%u -> jpeg %u bytes\n",
+                    static_cast<unsigned>(fb->width), static_cast<unsigned>(fb->height),
+                    static_cast<unsigned>(jpegLen));
       esp_camera_fb_return(fb);
     } else {
       Serial.println("[cam] fb_get failed, audio-only");
@@ -738,7 +746,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v20 (face dropped ~5mm, idle status text removed)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v21 (camera on-demand after mic, no boot probe)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
@@ -766,16 +774,15 @@ void setup() {
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
   if (!pcm) Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
 
-  // Probe the camera once, then DEINIT so cam_task is not running at idle
-  // (continuous cam_task overflows its stack -> reboot). It is re-inited on
-  // demand for each capture in handleTurn().
+  // NO boot-time camera probe. A camera init on the shared I2C bus can leave the
+  // ES7210 mic silent, and doing it at boot poisons the mic for the WHOLE session
+  // (that was the v18 regression). Instead the camera is inited strictly
+  // on-demand inside handleTurn(), AFTER recordAudio() — so the mic always
+  // records on a clean bus first, and a camera failure only costs that one turn's
+  // image, never the voice loop. cameraOk here is just the master enable.
 #if CAM_ENABLE
-  cameraOk = setupCamera();
-  if (cameraOk) {
-    esp_camera_deinit();
-    M5.In_I2C.begin();  // give the shared I2C bus (touch/audio) back to M5
-    Serial.println("[cam] on-demand mode (idle camera off)");
-  }
+  cameraOk = true;
+  Serial.println("[cam] on-demand mode — init per turn AFTER mic record (no boot probe)");
 #else
   cameraOk = false;
   Serial.println("[cam] disabled (CAM_ENABLE=0) — audio-only, touch/mic first");
