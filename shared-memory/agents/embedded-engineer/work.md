@@ -97,3 +97,9 @@
 - v22: postSee 타임아웃 60s->120s(느린 비전 완료되게), 생각중 얼굴에 경과초 카운터(멈춘것처럼 안보이게), -11 전용 메시지("서버가 느려요"). pio SUCCESS. 커밋 ccd8c4f.
 - i2c_driver_delete/gdma_disconnect 에러들은 온디맨드 카메라의 정상 노이즈(캡처·마이크 다 동작). 무해.
 - 남은건 서버 39-62초 추론 지연 = infra. 언어혼입(중국어)도 infra 메시지 전달함.
+
+##  — 먹통 원인=카메라 deinit이 I2C wedge→터치read hang. 카메라 OFF (v24)
+- 유저: "잘 안들렸어요" 뜨면 항상 멈춤/먹통. = 하드 프리즈(내 이전 "그냥 대기중" 설명 틀림).
+- 원인: esp_camera_deinit()이 공유 I2C(port1) wedge -> 다음 loop M5.update() FT6336 터치 I2C read가 블록 -> 루프 정지. 워치독 꺼서(esp_task_wdt_deinit) 리부트도 안됨 -> 영구 먹통. v21~23 캡처성공+마이크생존이 이걸 가림(터치/루프가 진짜 피해자).
+- v24: CAM_ENABLE=0 복귀 -> 음성루프+터치+볼륨2x 안정. lessons 문서에 프리즈 메커니즘+재활성 전 증명해야할 deinit 버스복구 절차 기록. pio SUCCESS. 커밋 afba4d5.
+- 교훈: "카메라 turn 성공"≠"안정". 캡처 로그 다음의 터치재동작+health지속까지 확인해야 진짜 안정. 워치독 끈 상태선 I2C hang=영구먹통.
