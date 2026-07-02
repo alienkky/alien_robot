@@ -378,15 +378,28 @@ size_t recordAudio(bool holdMode) {
     Serial.println("[mic] begin failed");
     return 0;
   }
+  // If the mic did not actually enable, the ES7210 hands back pure silence
+  // (the peak=0 seen on hardware). Log the enabled flag so a dead/muted codec
+  // is distinguishable from a merely quiet room.
+  Serial.printf("[mic] enabled=%d\n", M5.Mic.isEnabled() ? 1 : 0);
+
   size_t total = 0;
   Serial.println("[rec] recording...");
+  // Keep the I2S DMA continuously fed: queue the next chunk as soon as record()
+  // accepts it (it returns false only while its internal double-buffer is full),
+  // and yield briefly when the queue is momentarily full. The previous code
+  // waited on isRecording() after EVERY chunk, serialising capture and — at
+  // start-up — potentially leaving the first buffers unfilled, a candidate for
+  // the all-zero recording. We drain the last queued buffers once, after loop.
   while (total + kRecordChunk <= kMaxSamples) {
-    if (M5.Mic.record(pcm + total, kRecordChunk, kSampleRate)) {
-      while (M5.Mic.isRecording()) delay(1);
-      total += kRecordChunk;
+    if (!M5.Mic.record(pcm + total, kRecordChunk, kSampleRate)) {
+      delay(1);            // double-buffer full — let it flush, then retry
+      continue;
     }
+    total += kRecordChunk;
     if (holdMode && !touchPressed()) break;
   }
+  while (M5.Mic.isRecording()) delay(1);  // let the last queued chunk(s) finish
   M5.Mic.end();
   Serial.printf("[rec] %u samples\n", static_cast<unsigned>(total));
   return total;
@@ -397,6 +410,8 @@ size_t recordAudio(bool holdMode) {
 // logged peak also tells us if the mic captured anything at all.
 void applyMicGain(int16_t *buf, size_t n) {
   int32_t peak = 0;
+  int16_t s0 = n > 0 ? buf[0] : 0, s1 = n > 1 ? buf[1] : 0;
+  int16_t s2 = n > 2 ? buf[2] : 0, s3 = n > 3 ? buf[3] : 0;  // raw, pre-gain
   for (size_t i = 0; i < n; i++) {
     int32_t a = buf[i] < 0 ? -buf[i] : buf[i];
     if (a > peak) peak = a;
@@ -410,7 +425,10 @@ void applyMicGain(int16_t *buf, size_t n) {
       buf[i] = (v > 32767) ? 32767 : (v < -32768 ? -32768 : static_cast<int16_t>(v));
     }
   }
-  Serial.printf("[mic] peak=%d gain=%dx\n", static_cast<int>(peak), gain);
+  // raw[] are the first four samples BEFORE gain: all-zero here + peak=0 means
+  // the codec delivered pure silence (hardware/mute), not just a quiet room.
+  Serial.printf("[mic] peak=%d gain=%dx raw=[%d %d %d %d]\n",
+                static_cast<int>(peak), gain, s0, s1, s2, s3);
 }
 
 // Plays a WAV body on the speaker: parse the sample rate from the 44-byte
@@ -643,7 +661,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v15 (bubble-on-talk, small bubble, mic gain)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v16 (mic: continuous DMA feed + peak/raw diag)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
