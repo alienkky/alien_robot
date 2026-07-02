@@ -118,7 +118,9 @@ enum Emotion { EMO_NEUTRAL, EMO_LISTEN, EMO_THINK, EMO_HAPPY, EMO_SAD };
 
 M5Canvas *face = nullptr;
 Emotion curEmo = EMO_NEUTRAL;
-char faceText[256] = "";  // holds the (possibly long) Korean answer
+char faceText[256] = "";   // holds the (possibly long) Korean answer
+bool bubbleOn = false;     // speech bubble only shows while talking
+int g_seeCode = 0;         // last /api/see HTTP status (for friendly messages)
 
 static int utf8Len(uint8_t ch) {
   if (ch < 0x80) return 1;
@@ -212,24 +214,33 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
     }
   }
 
-  // Speech bubble (bottom) with the full, wrapped Korean text — no truncation.
-  if (faceText[0]) {
-    const int bx = 6, by = 104, bw = w - 12, bh = h - by - 6;
+  // Speech bubble — ONLY while talking, and kept small (~3 lines, scrolls).
+  if (bubbleOn && faceText[0]) {
+    const int by = 150, bx = 10, bw = w - 20, bh = h - by - 6;  // small bottom band
     c.fillTriangle(mx - 8, by + 1, mx + 8, by + 1, mx, by - 9, TFT_WHITE);  // tail
     c.fillRoundRect(bx, by, bw, bh, 8, TFT_WHITE);
     c.drawRoundRect(bx, by, bw, bh, 8, col);
     c.setFont(&fonts::efontKR_16);
     c.setTextSize(1);
     c.setTextColor(TFT_BLACK);
-    drawBubbleLines(c, faceText, revealGlyphs, bx + 8, by + 8, bw - 16, 20, (bh - 12) / 20);
+    drawBubbleLines(c, faceText, revealGlyphs, bx + 8, by + 6, bw - 16, 20, (bh - 10) / 20);
+    c.setFont(&fonts::Font0);
+  } else if (faceText[0]) {
+    // Not talking: just a compact status line at the bottom (no big box).
+    c.setFont(&fonts::efontKR_16);
+    c.setTextSize(1);
+    c.setTextColor(TFT_CYAN);
+    c.setCursor(8, h - 22);
+    c.print(faceText);
     c.setFont(&fonts::Font0);
   }
   c.pushSprite(0, 0);
 }
 
 // Set emotion + status/speech text (also mirrored to serial). Replaces status().
-void faceSay(Emotion e, const char *text) {
+void faceSay(Emotion e, const char *text, bool showBubble = false) {
   curEmo = e;
+  bubbleOn = showBubble;  // bubble only when we pass true (i.e. while talking)
   snprintf(faceText, sizeof(faceText), "%s", text ? text : "");
   Serial.printf("[ui] %s\n", faceText);
   drawFace(e, true, -1);
@@ -381,6 +392,27 @@ size_t recordAudio(bool holdMode) {
   return total;
 }
 
+// Auto-amplify the recorded PCM toward a target peak so quiet mic audio isn't
+// dropped by the server's speech detector (the cause of the /api/see 422). The
+// logged peak also tells us if the mic captured anything at all.
+void applyMicGain(int16_t *buf, size_t n) {
+  int32_t peak = 0;
+  for (size_t i = 0; i < n; i++) {
+    int32_t a = buf[i] < 0 ? -buf[i] : buf[i];
+    if (a > peak) peak = a;
+  }
+  int gain = (peak > 0) ? (18000 / peak) : 1;
+  if (gain < 1) gain = 1;
+  if (gain > 10) gain = 10;
+  if (gain > 1) {
+    for (size_t i = 0; i < n; i++) {
+      int32_t v = static_cast<int32_t>(buf[i]) * gain;
+      buf[i] = (v > 32767) ? 32767 : (v < -32768 ? -32768 : static_cast<int16_t>(v));
+    }
+  }
+  Serial.printf("[mic] peak=%d gain=%dx\n", static_cast<int>(peak), gain);
+}
+
 // Plays a WAV body on the speaker: parse the sample rate from the 44-byte
 // header, skip the header, stream the PCM to the AW88298 via M5.Speaker.
 void playWav(const uint8_t *wav, size_t len) {
@@ -463,6 +495,7 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
   uint32_t t0 = millis();
   int code = http.POST(body, bodyLen);
+  g_seeCode = code;
   Serial.printf("[http] /api/see -> %d (%lums)\n", code, static_cast<unsigned long>(millis() - t0));
   String resp;
   if (code == 200) resp = http.getString();
@@ -517,9 +550,10 @@ void handleTurn(bool holdMode) {
   size_t samples = recordAudio(holdMode);
   if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
     Serial.println("[turn] too short, skip");
-    faceSay(EMO_NEUTRAL, "너무 짧아요");
+    faceSay(EMO_NEUTRAL, "너무 짧아요 — 길게 말해줘");
     return;
   }
+  applyMicGain(pcm, samples);  // boost quiet audio so STT hears it
 
   // Camera is optional. When available: grab one frame, SHOW it on the display
   // ("what the robot saw"), then software-encode it to JPEG for the upload.
@@ -546,7 +580,11 @@ void handleTurn(bool holdMode) {
   String resp = postSee(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
-    faceSay(EMO_SAD, "서버 오류");
+    // Friendly, specific messages instead of a scary "server error".
+    if (g_seeCode == 422) faceSay(EMO_NEUTRAL, "잘 안 들렸어요, 다시 말해줘");
+    else if (g_seeCode == 400) faceSay(EMO_NEUTRAL, "너무 짧아요, 길게 말해줘");
+    else if (g_seeCode == -1 || g_seeCode == 0) faceSay(EMO_SAD, "서버 연결 안됨");
+    else faceSay(EMO_SAD, "서버 문제 (다시 시도)");
     return;
   }
 
@@ -560,10 +598,10 @@ void handleTurn(bool holdMode) {
   const char *answer = doc["answer"] | "";
   const char *audioUrl = doc["audio_url"] | "";
   Serial.printf("[turn] you: %s\n[turn] bot: %s\n", transcript, answer);
-  // Happy face + the spoken answer as the on-screen speech line, while it plays.
-  faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)");
+  // Happy face + speech bubble (only now, while talking) with the answer.
+  faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
   fetchAndPlay(String(audioUrl));
-  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
+  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");  // bubble off (default)
 }
 
 void connectWifi() {
@@ -605,7 +643,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v14 (on-demand camera, no cam_task crash)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v15 (bubble-on-talk, small bubble, mic gain)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
