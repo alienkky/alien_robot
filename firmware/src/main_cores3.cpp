@@ -26,6 +26,8 @@
 // software-encode to JPEG with frame2jpg() to keep the /api/see contract.
 // ─────────────────────────────────────────────────────────────────────
 
+#include <climits>  // INT_MIN sentinel for the optional pupil-offset args
+
 #include <M5Unified.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
@@ -47,13 +49,13 @@
 // truly required). Override any of these in config_cores3.h to change them.
 // Master camera switch. The GC0308 SCCB shares CoreS3's ONE internal I2C bus
 // (port 1) with the FT6336 touch panel AND the ES7210/AW88298 audio codecs.
-// esp_camera_init()/deinit() tear that bus down and rebuild it every turn, and
-// on hardware that left the touch panel dead after the first turn ("화면 터치
-// 동작 안 함"). Default OFF = audio-only so touch + mic stay rock-solid while we
-// stabilise the voice loop; set CAM_ENABLE 1 in config_cores3.h to bring the
-// camera back once the bus handoff is proven on the board.
+// setupCamera() now REUSES that bus (no release()/i2c_driver_delete()), so
+// esp_camera_init() no longer tears it down — the camera can run without killing
+// touch, and a failed sensor probe falls back to audio-only untouched. Default
+// ON. If touch still misbehaves on your board, set CAM_ENABLE 0 in
+// config_cores3.h to return to the proven audio-only loop.
 #ifndef CAM_ENABLE
-#define CAM_ENABLE 0
+#define CAM_ENABLE 1
 #endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
@@ -185,7 +187,11 @@ void drawBubbleLines(M5Canvas &c, const char *text, int reveal,
 
 // Draw the face. talkMouth: -1 = emotion mouth, 0 = closed, 1 = open (lip-sync).
 // revealGlyphs: -1 = show all bubble text; >=0 = stream only the first N glyphs.
-void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -1) {
+// pupilDx/pupilDy shift both pupils (eye-darting during "생각 중"). When left at
+// the sentinel (INT_MIN) THINK keeps its default up-right glance; any explicit
+// value overrides it so the thinking loop can sweep the pupils left/right.
+void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -1,
+              int pupilDx = INT_MIN, int pupilDy = INT_MIN) {
   if (!face) return;
   M5Canvas &c = *face;
   const int w = c.width(), h = c.height();
@@ -196,12 +202,13 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
   const int lx = w / 2 - 50, rx = w / 2 + 50;
   const int er = 24;
 
-  // Eyes — blink collapses to bars; THINK looks up-right.
+  // Eyes — blink collapses to bars. Pupil offset: caller override wins, else
+  // THINK glances up-right, everyone else looks straight ahead.
   if (eyesOpen) {
     c.fillCircle(lx, eyeY, er, col);
     c.fillCircle(rx, eyeY, er, col);
-    const int pdy = (e == EMO_THINK) ? -10 : 0;
-    const int pdx = (e == EMO_THINK) ? 7 : 0;
+    const int pdy = (pupilDy != INT_MIN) ? pupilDy : ((e == EMO_THINK) ? -10 : 0);
+    const int pdx = (pupilDx != INT_MIN) ? pupilDx : ((e == EMO_THINK) ? 7 : 0);
     c.fillCircle(lx + pdx, eyeY + pdy, 10, TFT_BLACK);
     c.fillCircle(rx + pdx, eyeY + pdy, 10, TFT_BLACK);
   } else {
@@ -335,19 +342,17 @@ void showPhoto(camera_fb_t *fb) {
 
 bool setupCamera() {
   camera_config_t c = makeCameraConfig();
-  // CoreS3 shares ONE internal I2C bus (port 1, SDA=12/SCL=11) across the
-  // AXP2101 PMIC, ES7210/AW88298 codecs, touch AND the camera SCCB. M5.begin()
-  // already installed the I2C driver on that port, so esp_camera_init() cannot
-  // install its own — that is the "i2c driver install error / sccb init err"
-  // seen on hardware. Release M5's bus, let the camera configure GC0308, then
-  // delete the camera's SCCB driver and re-acquire the bus for M5 (SCCB is idle
-  // during DVP frame capture, so audio + touch keep working afterwards).
-  M5.In_I2C.release();
+  // TRUE SCCB bus reuse. CoreS3 shares ONE internal I2C bus (port 1) across the
+  // AXP2101 PMIC, ES7210/AW88298 codecs, FT6336 touch AND the camera SCCB.
+  // Because c.sccb_i2c_port is set, esp_camera_init() talks to the GC0308 over
+  // M5's ALREADY-installed driver instead of installing its own — so we do NOT
+  // release or delete M5's bus. The old release()/i2c_driver_delete() dance is
+  // exactly what left the touch panel dead after a turn; removing it means the
+  // shared bus is never torn down, and if the sensor probe fails we simply fall
+  // back to audio-only with touch + mic completely unaffected.
   esp_err_t err = esp_camera_init(&c);
-  i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));
-  M5.In_I2C.begin();
   if (err != ESP_OK) {
-    Serial.printf("[cam] init failed 0x%x (try CAM_SCCB_I2C_PORT=0)\n", err);
+    Serial.printf("[cam] init failed 0x%x — audio-only (touch/mic unaffected)\n", err);
     return false;
   }
   // GC0308 image orientation. Function pointers are null-checked because the
@@ -357,7 +362,7 @@ bool setupCamera() {
     if (s->set_hmirror) s->set_hmirror(s, CAM_HMIRROR);
     if (s->set_vflip) s->set_vflip(s, CAM_VFLIP);
   }
-  Serial.println("[cam] GC0308 init OK");
+  Serial.println("[cam] GC0308 init OK (shared I2C reuse, no bus teardown)");
   return true;
 }
 
@@ -532,6 +537,56 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   return resp;
 }
 
+// ── "생각 중" animation while the gateway thinks ───────────────────────
+// The /api/see round-trip (STT + Brain180 vision + TTS) blocks for many seconds
+// — long enough that a still face looks frozen. Run that POST on a background
+// task and animate here instead: the pupils sweep left/right and the eyes blink.
+// handleTurn blocks in the animation loop until the task signals done, so the
+// audio/jpeg buffers it owns stay valid for the whole request.
+struct SeeJob {
+  const uint8_t *audio; size_t audioLen;
+  const uint8_t *jpeg;  size_t jpegLen;
+  volatile bool done;
+  String resp;
+};
+
+void seeJobTask(void *param) {
+  SeeJob *j = static_cast<SeeJob *>(param);
+  j->resp = postSee(j->audio, j->audioLen, j->jpeg, j->jpegLen);
+  j->done = true;
+  vTaskDelete(nullptr);
+}
+
+// Runs postSee off-thread and animates the thinking face until it returns.
+String postSeeThinking(const uint8_t *audio, size_t audioLen,
+                       const uint8_t *jpeg, size_t jpegLen) {
+  static SeeJob job;               // static: outlives this frame; one turn at a time
+  job.audio = audio; job.audioLen = audioLen;
+  job.jpeg = jpeg;   job.jpegLen = jpegLen;
+  job.done = false;  job.resp = String();
+
+  // 16 KB stack covers a plain-HTTP POST + getString(); a LAN URL does no TLS
+  // handshake. Pin to core 0 (WiFi core) so the Arduino loop core stays free.
+  TaskHandle_t h = nullptr;
+  BaseType_t ok = xTaskCreatePinnedToCore(seeJobTask, "see", 16384, &job, 5, &h, 0);
+  if (ok != pdPASS) {              // could not spawn — fall back to a blocking call
+    Serial.println("[think] task spawn failed, blocking");
+    return postSee(audio, audioLen, jpeg, jpegLen);
+  }
+
+  const uint32_t t0 = millis();
+  while (!job.done) {
+    const uint32_t el = millis() - t0;
+    // Pupils sweep L → centre → R → centre every ~1.4s; quick blink every ~2.4s.
+    const int step = (el / 350) % 4;
+    const int pdx = (step == 0) ? -9 : (step == 2) ? 9 : 0;
+    const bool blink = (el % 2400) < 150;
+    drawFace(EMO_THINK, !blink, -1, -1, pdx, -3);
+    delay(45);
+  }
+  return job.resp;
+}
+
 // Fetches audio_url (relative to the gateway) into PSRAM and plays it.
 void fetchAndPlay(const String &audioUrl) {
   if (audioUrl.isEmpty()) return;
@@ -610,7 +665,9 @@ void handleTurn(bool holdMode) {
   }
 
   faceSay(EMO_THINK, "생각 중...");
-  String resp = postSee(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
+  // Off-thread POST + animated thinking face (pupils dart, eyes blink) so the
+  // robot doesn't freeze during the multi-second server round-trip.
+  String resp = postSeeThinking(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
     // Friendly, specific messages instead of a scary "server error".
@@ -676,7 +733,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v17 (camera OFF by default — keep touch/mic alive)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v18 (camera reuse-bus ON + animated thinking face)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
