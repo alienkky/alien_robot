@@ -76,3 +76,10 @@
 - v18 조치: (1) setupCamera 버스 재사용(release/i2c_driver_delete 제거, sccb_i2c_port로 M5 드라이버 공유) -> 버스 안 부숨=터치 안 죽음, 실패시 audio-only 폴백. CAM_ENABLE 기본1 복귀. (2) postSeeThinking: HTTP를 백그라운드 task로 돌리고 생각중 얼굴 애니(눈동자 좌우+깜빡). drawFace에 pupilDx/Dy override 추가. task 실패시 blocking 폴백.
 - pio run -e cores3 SUCCESS. 커밋 e42a3a6.
 - 미검증: 카메라 버스 재사용이 실기 터치 유지하는지, 캡쳐 표시, 생각중 애니 실동작. 다음 로그로 확인: [cam] init OK(reuse) / 캡쳐화면 / 생각중 눈 움직임 / 터치 유지.
+
+##  — v18 카메라ON 회귀: 마이크 死, v19 롤백 + lessons 문서
+- 실기 v18 로그: [mic] peak=0 (마이크 死) + [turn] camera unavailable (카메라 init 실패). 최악: 둘 다 안 됨.
+- 판정: 카메라 init이 공유 I2C(port1) 건드리면 ES7210 마이크 무음. 부팅 프로브/실패만으로도 발생. 마이크는 카메라 OFF일 때만 peak>0. 구방식(release/delete)=터치死, 재사용(v18)=마이크死. 동시 사용 현 설계로 불가.
+- v19: CAM_ENABLE 기본0 롤백(음성루프 복구), 생각중 애니는 유지(버스 무관). docs/lessons-cores3.md 신규(마이크<->카메라 I2C 충돌·기준선·규칙). pio SUCCESS. 커밋 a5b27c3.
+- 규칙 확립: 한 빌드에 한 변경. 카메라는 플래그 뒤 기본OFF. 공유I2C 변경은 실기로그 전까지 가설. peak로 마이크 진단.
+- 카메라 부활 후보(미검증): 부팅프로브 제거+record 이후 on-demand init, deinit후 M5.Mic재init로 코덱복구, 안되면 동시사용 포기.
