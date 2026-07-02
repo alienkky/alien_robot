@@ -33,6 +33,7 @@
 #include <HTTPClient.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>  // TLS for https tunnel URLs (cloudflared/ngrok)
+#include <Preferences.h>       // persist the speaker volume across reboots (NVS)
 
 #include "esp_camera.h"
 #include "img_converters.h"  // frame2jpg() — software RGB565 -> JPEG encoder
@@ -76,7 +77,9 @@ constexpr int kSampleRate = 16000;
 constexpr int kMaxRecordSeconds = 4;
 constexpr size_t kMaxSamples = kSampleRate * kMaxRecordSeconds;  // 16-bit mono
 constexpr size_t kRecordChunk = 512;   // samples per M5.Mic.record() call
-constexpr uint8_t kSpeakerVolume = 160; // 0..255 — 2x louder than the old 80
+constexpr uint8_t kDefaultVolume = 160; // 0..255 default (2x the original 80)
+uint8_t g_speakerVolume = kDefaultVolume; // runtime, user-adjustable via the panel
+Preferences g_prefs;                      // NVS store — persists the volume
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
@@ -322,6 +325,93 @@ void showBattery() {
   drawFace(curEmo, true);  // restore the face
 }
 
+// Short preview beep at the current level so the user HEARS the volume while
+// adjusting. Speaker + mic share the I2S peripheral; caller owns begin()/end().
+void volumeBeep() {
+  M5.Speaker.setVolume(g_speakerVolume);
+  M5.Speaker.tone(880, 90);  // async 90ms tone
+}
+
+// Phone-style pull-UP panel (mirror of the top battery pull-down): adjust the
+// TTS playback volume. Tap the bar to set a level, use −/+ for fine steps, tap
+// "완료" (or 6s idle) to close. The new level is previewed with a beep and saved
+// to NVS so it survives a reboot.
+void showVolumeControl() {
+  const int w = M5.Display.width(), h = M5.Display.height();
+  const int barX = 24, barW = w - 48, barY = 90, barH = 40;
+  const int btnW = 70, btnH = 50, btnY = h - btnH - 8;
+  const int minusX = 16, plusX = w - 16 - btnW, doneX = w / 2 - btnW / 2;
+
+  M5.Speaker.begin();                 // grab I2S for the preview beeps
+  M5.Speaker.setVolume(g_speakerVolume);
+
+  auto redraw = [&]() {
+    const int pct = g_speakerVolume * 100 / 255;
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setFont(&fonts::efontKR_16);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.setCursor(20, 14);
+    M5.Display.print("음량 조절");
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setTextSize(2);
+    M5.Display.setCursor(w / 2 - 30, 40);
+    M5.Display.printf("%d%%", pct);
+    M5.Display.setTextSize(1);
+    // volume bar (tappable to set level directly)
+    M5.Display.drawRoundRect(barX, barY, barW, barH, 6, TFT_WHITE);
+    const int fillw = g_speakerVolume * (barW - 4) / 255;
+    if (fillw > 0) M5.Display.fillRoundRect(barX + 2, barY + 2, fillw, barH - 4, 5, TFT_CYAN);
+    // − / 완료 / + buttons
+    M5.Display.drawRoundRect(minusX, btnY, btnW, btnH, 8, TFT_WHITE);
+    M5.Display.setCursor(minusX + btnW / 2 - 5, btnY + btnH / 2 - 8);
+    M5.Display.print("-");
+    M5.Display.drawRoundRect(plusX, btnY, btnW, btnH, 8, TFT_WHITE);
+    M5.Display.setCursor(plusX + btnW / 2 - 5, btnY + btnH / 2 - 8);
+    M5.Display.print("+");
+    M5.Display.drawRoundRect(doneX, btnY, btnW, btnH, 8, TFT_GREEN);
+    M5.Display.setCursor(doneX + btnW / 2 - 16, btnY + btnH / 2 - 8);
+    M5.Display.print("완료");
+    M5.Display.setFont(&fonts::Font0);
+  };
+  redraw();
+
+  uint32_t lastAct = millis();
+  while (true) {
+    M5.update();
+    auto d = M5.Touch.getDetail();
+    if (d.wasPressed()) {
+      const int x = d.x, y = d.y;
+      bool changed = false, done = false;
+      if (y >= btnY && y <= btnY + btnH) {          // button row
+        if (x >= minusX && x <= minusX + btnW) {
+          g_speakerVolume = (g_speakerVolume <= 15) ? 0 : g_speakerVolume - 15;
+          changed = true;
+        } else if (x >= plusX && x <= plusX + btnW) {
+          g_speakerVolume = (g_speakerVolume >= 240) ? 255 : g_speakerVolume + 15;
+          changed = true;
+        } else if (x >= doneX && x <= doneX + btnW) {
+          done = true;
+        }
+      } else if (y >= barY - 12 && y <= barY + barH + 12 &&
+                 x >= barX && x <= barX + barW) {    // tap the bar → set level
+        int v = (x - barX) * 255 / barW;
+        g_speakerVolume = static_cast<uint8_t>(v < 0 ? 0 : (v > 255 ? 255 : v));
+        changed = true;
+      }
+      if (changed) { redraw(); volumeBeep(); lastAct = millis(); }
+      if (done) break;
+    }
+    if (millis() - lastAct > 6000) break;  // auto-close when idle
+    delay(20);
+  }
+
+  M5.Speaker.end();                        // release I2S for the next mic record
+  g_prefs.putUChar("vol", g_speakerVolume);  // persist across reboots
+  Serial.printf("[vol] set to %d (%d%%)\n", g_speakerVolume, g_speakerVolume * 100 / 255);
+  drawFace(curEmo, true);                  // restore the face
+}
+
 void faceInit() {
   face = new M5Canvas(&M5.Display);
   face->setPsram(true);
@@ -469,7 +559,7 @@ void playWav(const uint8_t *wav, size_t len) {
 
   M5.Mic.end();  // free the shared I2S before switching to the speaker
   M5.Speaker.begin();
-  M5.Speaker.setVolume(kSpeakerVolume);
+  M5.Speaker.setVolume(g_speakerVolume);
   M5.Speaker.playRaw(samples, n, rate, false);
   // Stream the caption + lip-sync, paced to the audio length.
   const uint32_t durationMs = (rate > 0) ? static_cast<uint32_t>((uint64_t)n * 1000 / rate) : 0;
@@ -759,8 +849,13 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v24 (camera OFF — fix touch-freeze — vol 2x kept)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v25 (volume panel: swipe up from bottom)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
+
+  // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
+  g_prefs.begin("robot", false);
+  g_speakerVolume = g_prefs.getUChar("vol", kDefaultVolume);
+  Serial.printf("[boot] volume = %d (%d%%)\n", g_speakerVolume, g_speakerVolume * 100 / 255);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
   // PANIC = code crash, BROWNOUT = power sag, TASK_WDT/INT_WDT = watchdog.
@@ -847,12 +942,29 @@ void loop() {
         while (touchPressed()) delay(10);  // consume the rest of the gesture
       }
       // released at the top without swiping -> ignore (not a talk trigger)
+    } else if (td.base_y > 200) {
+      // Bottom strip: an UPWARD swipe pulls up the volume panel (phone-style).
+      bool swiped = false;
+      while (true) {
+        M5.update();
+        auto d = M5.Touch.getDetail();
+        if (!d.isPressed()) break;
+        if (d.distanceY() < -50) { swiped = true; break; }
+        delay(10);
+      }
+      if (swiped) {
+        showVolumeControl();
+        while (touchPressed()) delay(10);  // consume the rest of the gesture
+      }
+      // tap at the bottom without swiping up -> ignore (not a talk trigger)
     } else {
-      handleTurn(/*holdMode=*/true);       // hold anywhere on the face to talk
+      handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
       while (touchPressed()) delay(10);     // wait for release
     }
   } else if (serialCmd == 'b') {
     showBattery();                          // serial 'b' = show battery (testing)
+  } else if (serialCmd == 'v') {
+    showVolumeControl();                    // serial 'v' = volume panel (testing)
   } else if (serialCmd == 't') {
     handleTurn(/*holdMode=*/false);
   } else if (curEmo == EMO_NEUTRAL && millis() - lastBlink > 3500) {
