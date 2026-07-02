@@ -35,6 +35,8 @@
 #include "esp_camera.h"
 #include "img_converters.h"  // frame2jpg() — software RGB565 -> JPEG encoder
 #include "driver/i2c.h"      // i2c_driver_delete() — hand the SCCB bus back to M5
+#include "soc/soc.h"          // brownout detector register
+#include "soc/rtc_cntl_reg.h"
 
 #include "config_cores3.h"
 
@@ -449,6 +451,9 @@ void handleTurn(bool holdMode) {
 
 void connectWifi() {
   WiFi.mode(WIFI_STA);
+  WiFi.persistent(false);
+  WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);  // stop the idle drop/re-associate cycle (a reboot trigger)
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
   Serial.print("WiFi connecting");
   faceSay(EMO_NEUTRAL, "WiFi 연결 중...");
@@ -458,7 +463,9 @@ void connectWifi() {
     Serial.print(".");
   }
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.printf("\nWiFi connected: %s\n", WiFi.localIP().toString().c_str());
+    // Lower TX power trims the current spikes that brown-out the board on TX.
+    WiFi.setTxPower(WIFI_POWER_13dBm);
+    Serial.printf("\nWiFi connected: %s (tx 13dBm)\n", WiFi.localIP().toString().c_str());
   } else {
     Serial.println("\nWiFi FAILED (check config_cores3.h)");
     faceSay(EMO_SAD, "WiFi 실패");
@@ -467,6 +474,12 @@ void connectWifi() {
 }  // namespace
 
 void setup() {
+  // Disable the ESP32 brown-out detector. Camera(continuous DVP) + WiFi TX spikes
+  // draw enough current to trip it on a marginal USB supply, which showed up as
+  // random reboots while idle (WiFi re-associate) and during the upload
+  // ("thinking"). Use a good USB-C cable/port too — this only masks a weak rail.
+  WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+
   auto cfg = M5.config();
   cfg.internal_mic = true;   // ES7210 dual mic
   cfg.internal_spk = true;   // AW88298 speaker amp
@@ -475,7 +488,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v8 (http timeout 60s)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v9 (stability: brownout off + wifi)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD
@@ -494,6 +507,15 @@ void setup() {
 void loop() {
   M5.update();
   static uint32_t lastBlink = 0;
+  static uint32_t lastWifiChk = 0;
+  // Recover from idle WiFi drops without rebooting.
+  if (millis() - lastWifiChk > 8000) {
+    lastWifiChk = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("[wifi] dropped — reconnecting (no reboot)");
+      WiFi.reconnect();
+    }
+  }
   bool touch = M5.Touch.getDetail().isPressed();
   bool serialTrig = (Serial.available() && Serial.read() == 't');
   if (touch) {
