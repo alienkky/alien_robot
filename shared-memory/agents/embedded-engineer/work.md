@@ -83,3 +83,10 @@
 - v19: CAM_ENABLE 기본0 롤백(음성루프 복구), 생각중 애니는 유지(버스 무관). docs/lessons-cores3.md 신규(마이크<->카메라 I2C 충돌·기준선·규칙). pio SUCCESS. 커밋 a5b27c3.
 - 규칙 확립: 한 빌드에 한 변경. 카메라는 플래그 뒤 기본OFF. 공유I2C 변경은 실기로그 전까지 가설. peak로 마이크 진단.
 - 카메라 부활 후보(미검증): 부팅프로브 제거+record 이후 on-demand init, deinit후 M5.Mic재init로 코덱복구, 안되면 동시사용 포기.
+
+##  — v21 마이크-안전 온디맨드 카메라 재시도
+- v20 로그: idle텍스트 제거OK, mic peak=2841 OK, /api/see 200 OK. 단 서버 답변="실시간 못본다"(이제 캐시 이미지도 없음). 유저: 카메라 해결 요구.
+- v18 회귀 원인 재확정: (1)부팅 카메라 프로브가 세션 전체 마이크 오염 (2)reuse init은 GC0308 탐지 실패.
+- v21 설계: 부팅 프로브 제거. 카메라는 handleTurn에서 recordAudio 이후에만 on-demand init. detect방식 복귀(자체 SCCB 드라이버 설치=센서 탐지 가능), orient설정후 i2c_driver_delete+M5.In_I2C.begin()으로 버스 반환. 마이크는 항상 깨끗한 버스에서 먼저 녹음 -> 카메라 실패해도 그 턴 이미지만 손해. [cam] captured WxH->jpeg N 로그 추가.
+- CAM_ENABLE=1 복귀, CAM_ENABLE 0 즉시폴백 유지. pio SUCCESS. 커밋 2616721.
+- 판별 로그(다음): [cam] GC0308 init OK / captured / 그 다음 턴 [mic] peak>0 유지 여부 / 터치 유지. 하나라도 깨지면 동시사용 불가 -> 모드분리 설계로.
