@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import base64
+import contextlib
 import hashlib
+import logging
 import os
 import subprocess
 import tempfile
@@ -19,6 +22,8 @@ from scipy import signal
 from scipy.io import wavfile
 
 load_dotenv()
+
+logger = logging.getLogger("robot_gateway")
 
 APP_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = APP_DIR / "artifacts"
@@ -212,6 +217,123 @@ async def ask_brain180(transcript: str, image_b64: str | None = None) -> str:
     return answer
 
 
+# ── Brain180 screen bridge (ALI-24) ─────────────────────────────────
+# The reverse direction of /api/see: robot camera/screen → Brain180 → browser.
+# Brain180 is the broker between this gateway and the robot-tutor browser UI
+# (the browser can't reach the robot directly). Two contracts, both bearer-token:
+#   1) GET  /api/robot/health  — periodic heartbeat; server marks the robot
+#      "online" (🟢) when it was seen within the last 30 s.
+#   2) POST /api/robot/frame   — push the latest JPEG frame; the browser's
+#      "📷 capture & analyse" button pulls it back out of Brain180 for vision.
+# Only active when LLM_PROVIDER=brain180 and BRAIN180_DEVICE_TOKEN is set.
+
+# Server accepts frames < 5 MB; keep a margin so a base64-inflated body still fits.
+MAX_FRAME_BYTES = 5 * 1024 * 1024
+
+
+def brain180_enabled() -> bool:
+    return env("LLM_PROVIDER", "ollama").lower() == "brain180" and bool(
+        env("BRAIN180_DEVICE_TOKEN")
+    )
+
+
+async def push_frame_to_brain180(
+    jpeg: bytes, media_type: str = "image/jpeg"
+) -> dict[str, Any]:
+    """Push one camera/screen frame to Brain180's latest-frame slot.
+
+    Raises HTTPException on config/size/transport errors so callers that must
+    surface failure (the /api/frame endpoint) can; the /api/see best-effort
+    forwarder swallows it instead.
+    """
+    if not env("BRAIN180_DEVICE_TOKEN"):
+        raise HTTPException(
+            status_code=500,
+            detail="BRAIN180_DEVICE_TOKEN not configured (set it to the server's ROBOT_DEVICE_TOKEN)",
+        )
+    if not jpeg:
+        raise HTTPException(status_code=400, detail="Empty frame")
+    if len(jpeg) >= MAX_FRAME_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Frame too large: {len(jpeg)} bytes (server limit is {MAX_FRAME_BYTES})",
+        )
+
+    base_url = env("BRAIN180_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
+    token = env("BRAIN180_DEVICE_TOKEN")
+    # Brain180 expects raw base64 with NO `data:` prefix.
+    payload = {
+        "image_base64": base64.b64encode(jpeg).decode("ascii"),
+        "media_type": media_type,
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    timeout = float(env("BRAIN180_TIMEOUT", "120"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/api/robot/frame", json=payload, headers=headers
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300] if exc.response is not None else str(exc)
+        raise HTTPException(
+            status_code=502, detail=f"Brain180 frame push failed: {detail}"
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Brain180 unreachable: {exc}"
+        ) from exc
+    return response.json()
+
+
+async def heartbeat_once(client: httpx.AsyncClient) -> bool:
+    """Ping Brain180's readiness probe once; a 2xx keeps the robot 🟢 online."""
+    base_url = env("BRAIN180_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
+    token = env("BRAIN180_DEVICE_TOKEN")
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        response = await client.get(f"{base_url}/api/robot/health", headers=headers)
+        response.raise_for_status()
+        return True
+    except httpx.HTTPError as exc:
+        logger.warning("Brain180 heartbeat failed: %s", exc)
+        return False
+
+
+async def heartbeat_loop() -> None:
+    """Background task: hold the robot 'online' on Brain180 while this gateway runs.
+
+    Brain180 counts /api/robot/health (and frame/chat) calls as liveness and flips
+    the browser header to 🟢 when the last one was within 30 s. We ping every
+    ROBOT_HEARTBEAT_INTERVAL seconds (default 10) — comfortably inside that window.
+    """
+    interval = max(1.0, float(env("ROBOT_HEARTBEAT_INTERVAL", "10")))
+    logger.info("Brain180 heartbeat loop started (every %.0fs)", interval)
+    async with httpx.AsyncClient(timeout=10) as client:
+        while True:
+            await heartbeat_once(client)
+            await asyncio.sleep(interval)
+
+
+@app.on_event("startup")
+async def _start_heartbeat() -> None:
+    if not brain180_enabled():
+        logger.info(
+            "Heartbeat disabled (needs LLM_PROVIDER=brain180 and BRAIN180_DEVICE_TOKEN)"
+        )
+        return
+    app.state.heartbeat_task = asyncio.create_task(heartbeat_loop())
+
+
+@app.on_event("shutdown")
+async def _stop_heartbeat() -> None:
+    task = getattr(app.state, "heartbeat_task", None)
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def ask_llm(transcript: str, image_b64: str | None = None) -> str:
     provider = env("LLM_PROVIDER", "ollama").lower()
     if provider == "brain180":
@@ -321,11 +443,48 @@ async def see(
         raw = await image.read()
         if raw:
             image_b64 = base64.b64encode(raw).decode("ascii")
+            # Best-effort: also publish this frame as the robot's latest screen so
+            # the browser's capture button can pull the same view. Never fail the
+            # chat turn on a push error.
+            with contextlib.suppress(HTTPException):
+                await push_frame_to_brain180(raw, image.content_type or "image/jpeg")
 
     answer = await ask_brain180(transcript, image_b64)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
     audio_url = synthesize_with_piper(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
+
+
+@app.post("/api/frame")
+async def frame(
+    request: Request,
+    image: UploadFile | None = File(None, description="JPEG camera/screen frame"),
+) -> dict[str, Any]:
+    """Push the robot's latest screen/camera frame to Brain180 (ALI-24 bridge).
+
+    The firmware calls this periodically (independent of a chat turn) so the
+    browser's "📷 capture & analyse" button always has a fresh view. Accepts
+    either multipart form-data (field `image`) or a raw image/* request body,
+    so a thin device HTTP client can POST bytes without multipart framing.
+    """
+    if not brain180_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="/api/frame requires LLM_PROVIDER=brain180 and BRAIN180_DEVICE_TOKEN",
+        )
+
+    if image is not None:
+        raw = await image.read()
+        media_type = image.content_type or "image/jpeg"
+    else:
+        raw = await request.body()
+        media_type = request.headers.get("content-type", "image/jpeg")
+        # A raw application/octet-stream upload is still a JPEG on the wire.
+        if not media_type.startswith("image/"):
+            media_type = "image/jpeg"
+
+    result = await push_frame_to_brain180(raw, media_type)
+    return {"ok": True, "bytes": len(raw), "brain180": result}
 
 
 @app.post("/api/reset")

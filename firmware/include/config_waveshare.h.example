@@ -18,6 +18,11 @@
 // Push-to-talk button. BOOT(GPIO0) is the only free button on this board.
 #define PIN_BUTTON 0
 
+// Screen bridge (ALI-24): how often (ms) to push a camera frame to /api/frame
+// while idle, so the browser robot-tutor's capture button has a fresh view.
+// Default 2000 (defined in main_waveshare.cpp). Uncomment to override.
+// #define FRAME_PUSH_INTERVAL_MS 2000
+
 // ── Audio: ES8311 codec (I2S data + I2C control) ──────────────────────
 #define ES8311_I2C_ADDR   0x18      // ES8311_CODEC_DEFAULT_ADDR
 #define ES8311_I2C_SDA    8

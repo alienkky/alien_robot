@@ -235,6 +235,61 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   return resp;
 }
 
+// ── Screen bridge (ALI-24): periodic camera frame push ────────────────
+// Between talk turns the firmware captures one JPEG every FRAME_PUSH_INTERVAL_MS
+// and POSTs it (multipart, field "image") to the gateway's /api/frame, which
+// forwards it to Brain180 as the robot's "latest screen". The browser tutor's
+// "📷 capture & analyse" button pulls that frame back out. Keep the cadence
+// modest (default 2s) so the DVP capture + Wi-Fi upload never starve the
+// push-to-talk loop and we stay well under the server's 5MB/frame limit.
+#ifndef FRAME_PUSH_INTERVAL_MS
+#define FRAME_PUSH_INTERVAL_MS 2000
+#endif
+
+// POSTs a single JPEG as multipart/form-data to /api/frame. Fire-and-forget:
+// logs non-200 but never blocks the voice loop. Returns true on HTTP 200.
+bool postFrame(const uint8_t *jpeg, size_t jpegLen) {
+  if (!jpeg || jpegLen == 0) return false;
+  const String boundary = "----alienrobotESP32frame";
+  const String head =
+      "--" + boundary + "\r\n"
+      "Content-Disposition: form-data; name=\"image\"; filename=\"f.jpg\"\r\n"
+      "Content-Type: image/jpeg\r\n\r\n";
+  const String tail = "\r\n--" + boundary + "--\r\n";
+
+  size_t bodyLen = head.length() + jpegLen + tail.length();
+  uint8_t *body = static_cast<uint8_t *>(ps_malloc(bodyLen));
+  if (!body) {
+    Serial.println("[frame] ps_malloc body failed");
+    return false;
+  }
+  size_t p = 0;
+  memcpy(body + p, head.c_str(), head.length()); p += head.length();
+  memcpy(body + p, jpeg, jpegLen); p += jpegLen;
+  memcpy(body + p, tail.c_str(), tail.length()); p += tail.length();
+
+  HTTPClient http;
+  http.begin(String(AI_SERVER_BASE_URL) + "/api/frame");
+  http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
+  int code = http.POST(body, bodyLen);
+  if (code != 200) Serial.printf("[frame] /api/frame -> %d\n", code);
+  http.end();
+  free(body);
+  return code == 200;
+}
+
+// Captures one frame and pushes it. Skipped silently if Wi-Fi is down.
+void pushScreenFrame() {
+  if (WiFi.status() != WL_CONNECTED) return;
+  camera_fb_t *fb = esp_camera_fb_get();
+  if (!fb) {
+    Serial.println("[frame] capture failed");
+    return;
+  }
+  postFrame(fb->buf, fb->len);
+  esp_camera_fb_return(fb);
+}
+
 // Fetches audio_url (relative to the gateway) and plays it.
 void fetchAndPlay(const String &audioUrl) {
   if (audioUrl.isEmpty()) return;
@@ -333,5 +388,15 @@ void loop() {
     if (digitalRead(PIN_BUTTON) == LOW) handleTurn();
     while (digitalRead(PIN_BUTTON) == LOW) delay(10);  // wait for release
   }
+
+  // Push a fresh screen frame on a timer, but never while recording/playing:
+  // handleTurn() runs synchronously above, so we only reach here when idle.
+  static uint32_t lastFramePush = 0;
+  uint32_t now = millis();
+  if (now - lastFramePush >= FRAME_PUSH_INTERVAL_MS) {
+    lastFramePush = now;
+    pushScreenFrame();
+  }
+
   delay(10);
 }
