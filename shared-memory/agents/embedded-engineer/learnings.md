@@ -38,3 +38,9 @@
 - 원인2 (카메라): CoreS3 내부 I2C(포트1 SDA12/SCL11)를 PMIC/코덱/터치/카메라 공유. M5.begin()이 선점 → esp_camera가 포트1 재install 시도 "i2c driver install error". sccb_i2c_port=1 재사용 안 됨(esp32-camera 2.0.4는 무조건 i2c_driver_install). → 패턴: `M5.In_I2C.release()` → esp_camera_init → `i2c_driver_delete(1)` → `M5.In_I2C.begin()`(캡처는 DVP라 SCCB 불요). 실패 시 CAM_SCCB_I2C_PORT=0 시도.
 - 카메라 실패해도 음성 검증되게 postSee 이미지 옵셔널화(오디오-only 전송).
 - 커밋 12d4bee push (branch 9aa2a597). 대기: 기영님 재플래시 새 로그.
+
+## 마이크 무음(peak=0) 판별법 — CoreS3 ES7210
+- peak가 정확히 0 = 코덱이 무음 전달(dead path), 조용한 방(작은 노이즈플로어~수십)과 다름. SW게인 무의미(0×n=0).
+- 서버 `/api/see 422` = STT "No speech detected"(backend/app.py:94). 이미지/포맷 문제 아님 — 무음 오디오가 원인.
+- I2C `i2c_driver_delete/SCCB` 에러 + `i2s_driver_uninstall port1 not installed`는 카메라 온디맨드 init + 첫 Speaker.end() 정상로그(무해).
+- M5Unified 마이크: record()는 비동기 더블버퍼. per-chunk isRecording() busy-wait는 첫 버퍼 미충전 위험 -> 연속 피드 후 끝에서 1회 drain이 권장 패턴.

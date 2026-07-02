@@ -57,3 +57,9 @@
 
 ## mistakes
 - 2026-07-01: 4090의 E: 드라이브를 "못 본다"고 두 번 잘못 답함. 실제론 이 런타임이 4090 자체. → 앞으론 hostname/nvidia-smi로 먼저 확인 후 판단. [[runtime-is-the-4090]]
+
+##  — ALI-21 마이크 peak=0 진단·수정 (v16)
+- 증상: 실기 시리얼 `[mic] peak=0 gain=1x`, `/api/see -> 422`, "잘 안 들렸어요" 후 대기 복귀.
+- 근본원인: 마이크가 완전 무음(모든 64000샘플=0) 캡처. 무음 PCM -> 서버 STT(backend/app.py:93-94) "No speech detected" 422 -> 펌웨어가 422->"잘 안 들렸어요" 매핑 후 idle 복귀. 즉 422 경로·"반응 없음"은 설계대로 정상, 진짜 버그는 마이크 무음.
+- 조치: recordAudio() per-chunk isRecording() 대기 -> 연속 DMA 피드+마지막 1회 drain. 진단로그 `[mic] enabled` + `raw=[...]` 추가. pio run -e cores3 SUCCESS. 커밋 9a84a1e, 브랜치 agent/embedded-engineer/9aa2a597 push.
+- 미해결: 실기 미검증. 다음 flash 로그의 enabled/peak/raw로 코덱-dead(하드웨어) vs 녹음루프-버그 판별.
