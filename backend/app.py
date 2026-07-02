@@ -134,6 +134,56 @@ async def ask_openai_compatible(transcript: str) -> str:
     return answer
 
 
+async def ask_vllm_vision(transcript: str, image_b64: str | None = None) -> str:
+    """Local 4090 vLLM (Qwen3.6 multimodal) vision turn — private, no cloud.
+
+    OpenAI-compatible chat with an optional inline image. Qwen3.6 is a reasoning
+    model, so thinking is disabled (chat_template_kwargs) to return the answer
+    directly and keep latency down; enough tokens are budgeted for the answer.
+    """
+    base_url = env("VLLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
+    system = env("SYSTEM_PROMPT") or "너는 책상 위 작은 한국어 AI 로봇이다. 사진을 보고 간결하게 한국어로 답한다."
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
+    messages.extend(list(_robot_history))  # rolling text history for continuity
+    user_content: list[dict[str, Any]] = [{"type": "text", "text": transcript or "지금 무엇이 보여?"}]
+    if image_b64:
+        user_content.append(
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}}
+        )
+    messages.append({"role": "user", "content": user_content})
+
+    payload = {
+        "model": env("VLLM_MODEL", "qwen36"),
+        "messages": messages,
+        "temperature": float(env("LLM_TEMPERATURE", "0.7")),
+        "max_tokens": int(env("VLLM_VISION_MAX_TOKENS", "768")),
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    headers = {"Authorization": f"Bearer {env('VLLM_API_KEY', 'EMPTY')}"}
+    timeout = float(env("VLLM_TIMEOUT", "120"))
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions", json=payload, headers=headers
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"local vLLM request failed: {exc}") from exc
+
+    data = response.json()
+    choices = data.get("choices", [])
+    msg = choices[0].get("message", {}) if choices else {}
+    answer = (msg.get("content") or "").strip()
+    if not answer:  # reasoning-only fallback if thinking wasn't disabled
+        answer = (msg.get("reasoning") or "").strip()
+    if not answer:
+        raise HTTPException(status_code=502, detail="local vLLM returned an empty answer")
+
+    _robot_history.append({"role": "user", "content": transcript})
+    _robot_history.append({"role": "assistant", "content": answer})
+    return answer
+
+
 # ── Brain180 robot bridge (ALI-21) ──────────────────────────────────
 # The brain is the Brain180 program's AI tutor, reached over its device route
 # POST /api/robot/chat (bearer-token, stateless). This gateway owns the short
@@ -339,8 +389,9 @@ async def see(
     can attach what the camera sees. Requires LLM_PROVIDER=brain180 (only the
     Brain180 bridge forwards images to a vision model).
     """
-    if env("LLM_PROVIDER", "ollama").lower() != "brain180":
-        raise HTTPException(status_code=400, detail="/api/see requires LLM_PROVIDER=brain180")
+    provider = env("LLM_PROVIDER", "ollama").lower()
+    if provider not in ("brain180", "vllm"):
+        raise HTTPException(status_code=400, detail="/api/see requires LLM_PROVIDER=brain180 or vllm")
 
     if text and text.strip():
         transcript = text.strip()
@@ -358,7 +409,10 @@ async def see(
         if raw:
             image_b64 = base64.b64encode(raw).decode("ascii")
 
-    answer = await ask_brain180(transcript, image_b64)
+    if provider == "vllm":
+        answer = await ask_vllm_vision(transcript, image_b64)  # local 4090 Qwen
+    else:
+        answer = await ask_brain180(transcript, image_b64)     # Brain180 (cloud)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
     audio_url = await synthesize_tts(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
