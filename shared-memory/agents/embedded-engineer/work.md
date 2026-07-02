@@ -63,3 +63,9 @@
 - 근본원인: 마이크가 완전 무음(모든 64000샘플=0) 캡처. 무음 PCM -> 서버 STT(backend/app.py:93-94) "No speech detected" 422 -> 펌웨어가 422->"잘 안 들렸어요" 매핑 후 idle 복귀. 즉 422 경로·"반응 없음"은 설계대로 정상, 진짜 버그는 마이크 무음.
 - 조치: recordAudio() per-chunk isRecording() 대기 -> 연속 DMA 피드+마지막 1회 drain. 진단로그 `[mic] enabled` + `raw=[...]` 추가. pio run -e cores3 SUCCESS. 커밋 9a84a1e, 브랜치 agent/embedded-engineer/9aa2a597 push.
 - 미해결: 실기 미검증. 다음 flash 로그의 enabled/peak/raw로 코덱-dead(하드웨어) vs 녹음루프-버그 판별.
+
+##  — ALI-21 터치 死 원인=카메라 I2C, 카메라 OFF 기본화 (v17)
+- 증상: 422 "잘 안 들렸어요" 화면에서 화면 터치 무반응, 재대화 불가.
+- 원인(가설): GC0308 SCCB가 CoreS3 단일 내부 I2C(port1)를 FT6336 터치+오디오 코덱과 공유. handleTurn 매 턴 esp_camera_init/deinit가 버스 재구성 -> deinit의 i2c_driver_delete가 M5 버스를 무너뜨려 첫 턴 후 터치 死. 로그의 `i2c_driver_delete(411) install error`가 그 충돌.
+- 조치: CAM_ENABLE 플래그 신설(기본0=오디오전용). 카메라 deinit 직후 M5.In_I2C.begin()으로 공유버스 회수. pio run -e cores3 SUCCESS. 커밋 f817e2b push.
+- 다음 판별: 카메라 OFF 상태로 flash -> 422 후 터치 재동작 되면 카메라 I2C가 원인 확정. 그 뒤 버스 handoff 고쳐 CAM_ENABLE=1 복귀.
