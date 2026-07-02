@@ -47,15 +47,16 @@
 // Optional camera tuning knobs default here, so an older config_cores3.h that
 // predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
 // truly required). Override any of these in config_cores3.h to change them.
-// Master camera switch — ON. Camera is inited strictly ON-DEMAND inside
-// handleTurn AFTER recordAudio() (never at boot), with a full I2C hand-back to
-// M5 after each capture (see setupCamera + docs/lessons-cores3.md). This ordering
-// is the mic-safe design: the mic always records on a clean bus first, so a
-// camera hiccup can only cost a single turn's image, not the voice loop. If your
-// board still shows [mic] peak=0 AFTER a camera turn, set CAM_ENABLE 0 in
-// config_cores3.h to instantly fall back to the proven audio-only loop.
+// Master camera switch — OFF (stability first). CONFIRMED on hardware: with the
+// camera ON, esp_camera_deinit() leaves the shared internal I2C bus (port 1)
+// wedged, and because the watchdog is disabled, the very next M5.update() touch
+// read HANGS the whole loop — a permanent freeze ("잘 안 들렸어요" 화면에서 먹통).
+// The mic-safe ordering saved the mic, but NOT the touch/loop. The voice-only
+// builds (camera OFF) never froze. So until a freeze-free camera teardown is
+// PROVEN on the board, the camera stays off and the robot stays reliable.
+// Set CAM_ENABLE 1 in config_cores3.h only for isolated camera bring-up tests.
 #ifndef CAM_ENABLE
-#define CAM_ENABLE 1
+#define CAM_ENABLE 0
 #endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
@@ -758,7 +759,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v23 (speaker volume 2x: 80 -> 160)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v24 (camera OFF — fix touch-freeze — vol 2x kept)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
