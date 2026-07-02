@@ -344,7 +344,9 @@ bool setupCamera() {
 // (while idle), so we drop a couple of stale ones first — otherwise every turn
 // reuses the same old image. Caller must esp_camera_fb_return() the result.
 camera_fb_t *captureFresh() {
-  for (int i = 0; i < 2; i++) {
+  // Drop a few frames: clears stale ring buffers AND lets the GC0308 auto-
+  // exposure settle after an on-demand (cold) init so the photo isn't dark/green.
+  for (int i = 0; i < 4; i++) {
     camera_fb_t *stale = esp_camera_fb_get();
     if (stale) esp_camera_fb_return(stale);
   }
@@ -521,10 +523,13 @@ void handleTurn(bool holdMode) {
 
   // Camera is optional. When available: grab one frame, SHOW it on the display
   // ("what the robot saw"), then software-encode it to JPEG for the upload.
+  // On-demand camera: init only for this capture, then deinit. The cam_task
+  // stack overflows if the camera runs continuously (the reboot cause), so we
+  // never leave it running at idle.
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
-  if (cameraOk) {
-    camera_fb_t *fb = captureFresh();  // drop stale buffers, grab a new frame
+  if (cameraOk && setupCamera()) {
+    camera_fb_t *fb = captureFresh();
     if (fb) {
       showPhoto(fb);  // display the captured photo for ~1.5s
       if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
@@ -532,6 +537,7 @@ void handleTurn(bool holdMode) {
     } else {
       Serial.println("[cam] fb_get failed, audio-only");
     }
+    esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
@@ -599,7 +605,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v13 (battery pull-down)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v14 (on-demand camera, no cam_task crash)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
@@ -627,7 +633,14 @@ void setup() {
   pcm = static_cast<int16_t *>(ps_malloc(kMaxSamples * sizeof(int16_t)));
   if (!pcm) Serial.println("[boot] PSRAM alloc failed — is N16R8 PSRAM enabled?");
 
+  // Probe the camera once, then DEINIT so cam_task is not running at idle
+  // (continuous cam_task overflows its stack -> reboot). It is re-inited on
+  // demand for each capture in handleTurn().
   cameraOk = setupCamera();
+  if (cameraOk) {
+    esp_camera_deinit();
+    Serial.println("[cam] on-demand mode (idle camera off)");
+  }
   connectWifi();
 
   faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
