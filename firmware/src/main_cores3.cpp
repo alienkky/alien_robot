@@ -116,59 +116,91 @@ enum Emotion { EMO_NEUTRAL, EMO_LISTEN, EMO_THINK, EMO_HAPPY, EMO_SAD };
 
 M5Canvas *face = nullptr;
 Emotion curEmo = EMO_NEUTRAL;
-char faceText[96] = "";
+char faceText[256] = "";  // holds the (possibly long) Korean answer
 
-void drawFace(Emotion e, bool eyesOpen) {
+static int utf8Len(uint8_t ch) {
+  if (ch < 0x80) return 1;
+  if ((ch >> 5) == 0x6) return 2;
+  if ((ch >> 4) == 0xE) return 3;
+  if ((ch >> 3) == 0x1E) return 4;
+  return 1;
+}
+
+// Word-wrap UTF-8 (Korean-safe) text into a box so nothing is cut off.
+// Caller sets font + colour first; breaks per glyph by measured width and on \n.
+void drawWrapped(M5Canvas &c, const char *text, int x, int y, int w, int lineH, int maxLines) {
+  int line = 0;
+  String cur = "";
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(text);
+  while (*p && line < maxLines) {
+    if (*p == '\n') {
+      c.setCursor(x, y + line * lineH); c.print(cur);
+      cur = ""; line++; p++;
+      continue;
+    }
+    int n = utf8Len(*p);
+    String cand = cur;
+    for (int i = 0; i < n && p[i]; i++) cand += static_cast<char>(p[i]);
+    if (c.textWidth(cand) > w && cur.length() > 0) {
+      c.setCursor(x, y + line * lineH); c.print(cur);
+      cur = ""; line++;
+      continue;  // re-place this glyph on the next line
+    }
+    cur = cand; p += n;
+  }
+  if (line < maxLines && cur.length() > 0) { c.setCursor(x, y + line * lineH); c.print(cur); }
+}
+
+// Draw the face. talkMouth: -1 = emotion mouth, 0 = closed, 1 = open (lip-sync).
+void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1) {
   if (!face) return;
   M5Canvas &c = *face;
   const int w = c.width(), h = c.height();
   c.fillSprite(TFT_BLACK);
 
   const uint16_t col = TFT_CYAN;
-  const int eyeY = h / 2 - 24;
-  const int lx = w / 2 - 58, rx = w / 2 + 58;
-  const int er = 30;  // eye radius
+  const int eyeY = 44;
+  const int lx = w / 2 - 50, rx = w / 2 + 50;
+  const int er = 24;
 
-  // Eyes — blink collapses them to bars; THINK looks up-right.
+  // Eyes — blink collapses to bars; THINK looks up-right.
   if (eyesOpen) {
     c.fillCircle(lx, eyeY, er, col);
     c.fillCircle(rx, eyeY, er, col);
-    const int pdy = (e == EMO_THINK) ? -12 : 0;
-    const int pdx = (e == EMO_THINK) ? 8 : 0;
-    c.fillCircle(lx + pdx, eyeY + pdy, 12, TFT_BLACK);
-    c.fillCircle(rx + pdx, eyeY + pdy, 12, TFT_BLACK);
+    const int pdy = (e == EMO_THINK) ? -10 : 0;
+    const int pdx = (e == EMO_THINK) ? 7 : 0;
+    c.fillCircle(lx + pdx, eyeY + pdy, 10, TFT_BLACK);
+    c.fillCircle(rx + pdx, eyeY + pdy, 10, TFT_BLACK);
   } else {
-    c.fillRoundRect(lx - er, eyeY - 5, er * 2, 10, 5, col);
-    c.fillRoundRect(rx - er, eyeY - 5, er * 2, 10, 5, col);
+    c.fillRoundRect(lx - er, eyeY - 4, er * 2, 8, 4, col);
+    c.fillRoundRect(rx - er, eyeY - 4, er * 2, 8, 4, col);
   }
 
-  // Mouth per emotion.
-  const int mx = w / 2, my = eyeY + 78;
-  switch (e) {
-    case EMO_HAPPY:  // upward smile
-      for (int i = -44; i <= 44; i++) c.fillRect(mx + i, my + 14 - (i * i) / 70, 2, 4, col);
-      break;
-    case EMO_SAD:  // downward frown
-      for (int i = -44; i <= 44; i++) c.fillRect(mx + i, my - 14 + (i * i) / 70, 2, 4, col);
-      break;
-    case EMO_THINK:  // small off-centre mouth
-      c.fillCircle(mx + 26, my, 9, col);
-      break;
-    case EMO_LISTEN:  // open (listening)
-      c.fillEllipse(mx, my, 26, 16, col);
-      break;
-    default:  // NEUTRAL
-      c.fillRoundRect(mx - 30, my - 3, 60, 7, 3, col);
-      break;
+  // Mouth — lip-sync (open/closed) while speaking, otherwise per-emotion.
+  const int mx = w / 2, my = 84;
+  if (talkMouth >= 0) {
+    if (talkMouth == 1) c.fillEllipse(mx, my, 18, 13, col);      // open
+    else c.fillRoundRect(mx - 18, my - 3, 36, 6, 3, col);        // closed
+  } else {
+    switch (e) {
+      case EMO_HAPPY: for (int i = -40; i <= 40; i++) c.fillRect(mx + i, my + 12 - (i * i) / 66, 2, 4, col); break;
+      case EMO_SAD:   for (int i = -40; i <= 40; i++) c.fillRect(mx + i, my - 12 + (i * i) / 66, 2, 4, col); break;
+      case EMO_THINK: c.fillCircle(mx + 22, my, 8, col); break;
+      case EMO_LISTEN: c.fillEllipse(mx, my, 22, 14, col); break;
+      default: c.fillRoundRect(mx - 26, my - 3, 52, 6, 3, col); break;
+    }
   }
 
-  // Status / speech line (Korean-capable font).
+  // Speech bubble (bottom) with the full, wrapped Korean text — no truncation.
   if (faceText[0]) {
+    const int bx = 6, by = 104, bw = w - 12, bh = h - by - 6;
+    c.fillTriangle(mx - 8, by + 1, mx + 8, by + 1, mx, by - 9, TFT_WHITE);  // tail
+    c.fillRoundRect(bx, by, bw, bh, 8, TFT_WHITE);
+    c.drawRoundRect(bx, by, bw, bh, 8, col);
     c.setFont(&fonts::efontKR_16);
     c.setTextSize(1);
-    c.setTextColor(TFT_WHITE);
-    c.setCursor(6, h - 20);
-    c.print(faceText);
+    c.setTextColor(TFT_BLACK);
+    drawWrapped(c, faceText, bx + 8, by + 8, bw - 16, 20, (bh - 12) / 20);
     c.setFont(&fonts::Font0);
   }
   c.pushSprite(0, 0);
@@ -179,7 +211,22 @@ void faceSay(Emotion e, const char *text) {
   curEmo = e;
   snprintf(faceText, sizeof(faceText), "%s", text ? text : "");
   Serial.printf("[ui] %s\n", faceText);
-  drawFace(e, true);
+  drawFace(e, true, -1);
+}
+
+// Animate the mouth (lip-sync) while the speaker is playing the answer.
+void animateMouthWhilePlaying() {
+  uint32_t last = 0;
+  bool open = false;
+  while (M5.Speaker.isPlaying()) {
+    if (millis() - last > 130) {
+      open = !open;
+      drawFace(curEmo, true, open ? 1 : 0);
+      last = millis();
+    }
+    delay(10);
+  }
+  drawFace(curEmo, true, 0);  // close mouth when done
 }
 
 void faceInit() {
@@ -284,7 +331,7 @@ void playWav(const uint8_t *wav, size_t len) {
   M5.Speaker.begin();
   M5.Speaker.setVolume(kSpeakerVolume);
   M5.Speaker.playRaw(samples, n, rate, false);
-  while (M5.Speaker.isPlaying()) delay(5);  // buffer must persist until done
+  animateMouthWhilePlaying();  // lip-sync the mouth while the answer plays
   M5.Speaker.end();
 }
 
@@ -488,7 +535,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v9 (stability: brownout off + wifi)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v10 (speech bubble + wrap + lip-sync)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD
