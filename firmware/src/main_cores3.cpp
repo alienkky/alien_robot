@@ -75,7 +75,7 @@ constexpr int kSampleRate = 16000;
 constexpr int kMaxRecordSeconds = 4;
 constexpr size_t kMaxSamples = kSampleRate * kMaxRecordSeconds;  // 16-bit mono
 constexpr size_t kRecordChunk = 512;   // samples per M5.Mic.record() call
-constexpr uint8_t kSpeakerVolume = 80; // 0..255 (kept low for desk use)
+constexpr uint8_t kSpeakerVolume = 160; // 0..255 — 2x louder than the old 80
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
@@ -758,7 +758,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v22 (120s vision timeout + elapsed counter)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v23 (speaker volume 2x: 80 -> 160)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
