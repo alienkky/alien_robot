@@ -47,15 +47,18 @@
 // Optional camera tuning knobs default here, so an older config_cores3.h that
 // predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
 // truly required). Override any of these in config_cores3.h to change them.
-// Master camera switch. The GC0308 SCCB shares CoreS3's ONE internal I2C bus
-// (port 1) with the FT6336 touch panel AND the ES7210/AW88298 audio codecs.
-// setupCamera() now REUSES that bus (no release()/i2c_driver_delete()), so
-// esp_camera_init() no longer tears it down — the camera can run without killing
-// touch, and a failed sensor probe falls back to audio-only untouched. Default
-// ON. If touch still misbehaves on your board, set CAM_ENABLE 0 in
-// config_cores3.h to return to the proven audio-only loop.
+// Master camera switch — default OFF. HARD-LEARNED on hardware (see
+// docs/lessons-cores3.md): ANY esp_camera_init() on the shared internal I2C bus
+// (port 1) — even the reuse path, even a probe that then fails — leaves the
+// ES7210 mic silent (peak=0, enabled=1 but no samples). The mic only captures
+// (peak>0) with the camera fully OFF. The old release()/i2c_driver_delete() path
+// additionally killed the FT6336 touch. So the camera and the working voice loop
+// cannot share this bus with the current design. Keep this 0 until a mic-safe
+// camera bring-up is PROVEN on the board; do not flip it on in a build that also
+// touches the voice loop. Set CAM_ENABLE 1 in config_cores3.h only for isolated
+// camera experiments.
 #ifndef CAM_ENABLE
-#define CAM_ENABLE 1
+#define CAM_ENABLE 0
 #endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
@@ -733,7 +736,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v18 (camera reuse-bus ON + animated thinking face)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v19 (camera OFF again — mic-safe — + thinking anim)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
