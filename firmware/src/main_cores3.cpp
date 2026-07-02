@@ -529,11 +529,13 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   WiFiClientSecure secure;
   WiFiClient plain;
   httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/see");
-  // A vision turn is STT + Brain180 (vision LLM) + TTS on the server — easily
-  // several seconds. The HTTPClient default read timeout is only 5s, so the
-  // device was giving up before the answer arrived (looked like "no reply").
+  // A vision turn is STT + Brain180 (vision LLM) + TTS on the server. On the
+  // 4090 this measured ~62s WITH an image — just over the old 60s read timeout,
+  // so it failed with error(-11) by ~2s despite the server still working. Give
+  // it 120s of headroom; the animated elapsed-seconds counter keeps the wait
+  // visibly alive. (Server latency itself is an infra concern, flagged separately.)
   http.setConnectTimeout(15000);
-  http.setTimeout(60000);
+  http.setTimeout(120000);
   if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
   uint32_t t0 = millis();
@@ -585,8 +587,17 @@ String postSeeThinking(const uint8_t *audio, size_t audioLen,
   }
 
   const uint32_t t0 = millis();
+  uint32_t shownSec = 999;
   while (!job.done) {
     const uint32_t el = millis() - t0;
+    // Live elapsed-seconds counter so a slow server (vision can take ~1 min)
+    // reads as "working", not "frozen". Updated once per second into faceText,
+    // which drawFace shows as the bottom status line.
+    const uint32_t sec = el / 1000;
+    if (sec != shownSec) {
+      shownSec = sec;
+      snprintf(faceText, sizeof(faceText), "생각 중... %lus", static_cast<unsigned long>(sec));
+    }
     // Pupils sweep L → centre → R → centre every ~1.4s; quick blink every ~2.4s.
     const int step = (el / 350) % 4;
     const int pdx = (step == 0) ? -9 : (step == 2) ? 9 : 0;
@@ -686,6 +697,7 @@ void handleTurn(bool holdMode) {
     // Friendly, specific messages instead of a scary "server error".
     if (g_seeCode == 422) faceSay(EMO_NEUTRAL, "잘 안 들렸어요, 다시 말해줘");
     else if (g_seeCode == 400) faceSay(EMO_NEUTRAL, "너무 짧아요, 길게 말해줘");
+    else if (g_seeCode == -11) faceSay(EMO_NEUTRAL, "서버가 느려요 — 다시 말해줘");
     else if (g_seeCode == -1 || g_seeCode == 0) faceSay(EMO_SAD, "서버 연결 안됨");
     else faceSay(EMO_SAD, "서버 문제 (다시 시도)");
     return;
@@ -746,7 +758,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v21 (camera on-demand after mic, no boot probe)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v22 (120s vision timeout + elapsed counter)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
