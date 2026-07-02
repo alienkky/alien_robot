@@ -201,7 +201,9 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
   c.fillSprite(TFT_BLACK);
 
   const uint16_t col = TFT_CYAN;
-  const int eyeY = 44;
+  // Drop the whole face ~5mm on the 320x240 CoreS3 LCD (~7.9 px/mm → 40px).
+  const int kFaceDrop = 40;
+  const int eyeY = 44 + kFaceDrop;
   const int lx = w / 2 - 50, rx = w / 2 + 50;
   const int er = 24;
 
@@ -220,7 +222,7 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
   }
 
   // Mouth — lip-sync (open/closed) while speaking, otherwise per-emotion.
-  const int mx = w / 2, my = 84;
+  const int mx = w / 2, my = 84 + kFaceDrop;
   if (talkMouth >= 0) {
     if (talkMouth == 1) c.fillEllipse(mx, my, 18, 13, col);      // open
     else c.fillRoundRect(mx - 18, my - 3, 36, 6, 3, col);        // closed
@@ -694,7 +696,7 @@ void handleTurn(bool holdMode) {
   // Happy face + speech bubble (only now, while talking) with the answer.
   faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
   fetchAndPlay(String(audioUrl));
-  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");  // bubble off (default)
+  faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
 void connectWifi() {
@@ -736,7 +738,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v19 (camera OFF again — mic-safe — + thinking anim)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v20 (face dropped ~5mm, idle status text removed)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
@@ -780,7 +782,7 @@ void setup() {
 #endif
   connectWifi();
 
-  faceSay(EMO_NEUTRAL, "대기 중 — 화면 터치 / 't'");
+  faceSay(EMO_NEUTRAL, "");  // idle: face only, no on-screen status text
   Serial.println("[boot] ready — hold the touch screen, or send 't' over serial, to talk");
 }
 
