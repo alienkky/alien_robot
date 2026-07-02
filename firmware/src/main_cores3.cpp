@@ -126,33 +126,52 @@ static int utf8Len(uint8_t ch) {
   return 1;
 }
 
-// Word-wrap UTF-8 (Korean-safe) text into a box so nothing is cut off.
-// Caller sets font + colour first; breaks per glyph by measured width and on \n.
-void drawWrapped(M5Canvas &c, const char *text, int x, int y, int w, int lineH, int maxLines) {
-  int line = 0;
+int countGlyphs(const char *text) {
+  int g = 0;
+  const uint8_t *p = reinterpret_cast<const uint8_t *>(text);
+  while (*p) { p += utf8Len(*p); g++; }
+  return g;
+}
+
+// Word-wrap UTF-8 (Korean-safe) text and draw it in the bubble. Only the first
+// `reveal` glyphs are shown (reveal < 0 = all) so the caption can stream out as
+// the robot speaks; when it overflows `maxLines` the view auto-scrolls to the
+// tail (the newest lines), StackChan-style. Caller sets font + colour first.
+void drawBubbleLines(M5Canvas &c, const char *text, int reveal,
+                     int x, int y, int w, int lineH, int maxLines) {
+  static String lines[24];
+  int count = 0;
   String cur = "";
   const uint8_t *p = reinterpret_cast<const uint8_t *>(text);
-  while (*p && line < maxLines) {
+  int glyphs = 0;
+  while (*p) {
+    if (reveal >= 0 && glyphs >= reveal) break;
     if (*p == '\n') {
-      c.setCursor(x, y + line * lineH); c.print(cur);
-      cur = ""; line++; p++;
+      if (count < 24) lines[count++] = cur;
+      cur = ""; p++; glyphs++;
       continue;
     }
     int n = utf8Len(*p);
     String cand = cur;
     for (int i = 0; i < n && p[i]; i++) cand += static_cast<char>(p[i]);
     if (c.textWidth(cand) > w && cur.length() > 0) {
-      c.setCursor(x, y + line * lineH); c.print(cur);
-      cur = ""; line++;
+      if (count < 24) lines[count++] = cur;
+      cur = "";
       continue;  // re-place this glyph on the next line
     }
-    cur = cand; p += n;
+    cur = cand; p += n; glyphs++;
   }
-  if (line < maxLines && cur.length() > 0) { c.setCursor(x, y + line * lineH); c.print(cur); }
+  if (cur.length() > 0 && count < 24) lines[count++] = cur;
+  const int start = count > maxLines ? count - maxLines : 0;  // scroll to newest
+  for (int i = start; i < count; i++) {
+    c.setCursor(x, y + (i - start) * lineH);
+    c.print(lines[i]);
+  }
 }
 
 // Draw the face. talkMouth: -1 = emotion mouth, 0 = closed, 1 = open (lip-sync).
-void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1) {
+// revealGlyphs: -1 = show all bubble text; >=0 = stream only the first N glyphs.
+void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -1) {
   if (!face) return;
   M5Canvas &c = *face;
   const int w = c.width(), h = c.height();
@@ -200,7 +219,7 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1) {
     c.setFont(&fonts::efontKR_16);
     c.setTextSize(1);
     c.setTextColor(TFT_BLACK);
-    drawWrapped(c, faceText, bx + 8, by + 8, bw - 16, 20, (bh - 12) / 20);
+    drawBubbleLines(c, faceText, revealGlyphs, bx + 8, by + 8, bw - 16, 20, (bh - 12) / 20);
     c.setFont(&fonts::Font0);
   }
   c.pushSprite(0, 0);
@@ -214,19 +233,22 @@ void faceSay(Emotion e, const char *text) {
   drawFace(e, true, -1);
 }
 
-// Animate the mouth (lip-sync) while the speaker is playing the answer.
-void animateMouthWhilePlaying() {
-  uint32_t last = 0;
+// Lip-sync the mouth AND stream the caption text out (auto-scrolling) while the
+// speaker plays. durationMs paces the reveal so the text finishes ~with the audio.
+void animateMouthWhilePlaying(uint32_t durationMs) {
+  const int total = countGlyphs(faceText);
+  const uint32_t startT = millis();
+  uint32_t lastMouth = 0;
   bool open = false;
   while (M5.Speaker.isPlaying()) {
-    if (millis() - last > 130) {
-      open = !open;
-      drawFace(curEmo, true, open ? 1 : 0);
-      last = millis();
-    }
-    delay(10);
+    const uint32_t el = millis() - startT;
+    int reveal = (durationMs > 0) ? static_cast<int>((uint64_t)total * el / durationMs) : total;
+    if (reveal > total) reveal = total;
+    if (millis() - lastMouth > 130) { open = !open; lastMouth = millis(); }
+    drawFace(curEmo, true, open ? 1 : 0, reveal);
+    delay(30);
   }
-  drawFace(curEmo, true, 0);  // close mouth when done
+  drawFace(curEmo, true, 0, total);  // full text, mouth closed
 }
 
 void faceInit() {
@@ -331,7 +353,9 @@ void playWav(const uint8_t *wav, size_t len) {
   M5.Speaker.begin();
   M5.Speaker.setVolume(kSpeakerVolume);
   M5.Speaker.playRaw(samples, n, rate, false);
-  animateMouthWhilePlaying();  // lip-sync the mouth while the answer plays
+  // Stream the caption + lip-sync, paced to the audio length.
+  const uint32_t durationMs = (rate > 0) ? static_cast<uint32_t>((uint64_t)n * 1000 / rate) : 0;
+  animateMouthWhilePlaying(durationMs);
   M5.Speaker.end();
 }
 
@@ -535,7 +559,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v10 (speech bubble + wrap + lip-sync)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v11 (streaming caption scroll)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   faceInit();                       // robot face on the LCD
