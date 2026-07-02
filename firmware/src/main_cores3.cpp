@@ -253,6 +253,44 @@ void animateMouthWhilePlaying(uint32_t durationMs) {
   drawFace(curEmo, true, 0, total);  // full text, mouth closed
 }
 
+// Phone-style pull-down status: a top bar with a battery gauge, % and a charging
+// bolt. Drawn over the face for ~2.5s, then the face is restored.
+void showBattery() {
+  const int lvl = M5.Power.getBatteryLevel();                       // 0..100, -1 unknown
+  const bool chg = (M5.Power.isCharging() == m5::Power_Class::is_charging);
+  const int pct = (lvl < 0) ? 0 : (lvl > 100 ? 100 : lvl);
+  const int w = M5.Display.width();
+
+  M5.Display.fillRect(0, 0, w, 42, TFT_BLACK);
+  M5.Display.fillRoundRect(4, 4, w - 8, 34, 6, 0x2124);  // dark bar
+
+  // Battery glyph on the right.
+  const int bw = 44, bh = 20, bx = w - bw - 18, by = 11;
+  M5.Display.drawRoundRect(bx, by, bw, bh, 3, TFT_WHITE);
+  M5.Display.fillRect(bx + bw, by + 6, 3, 8, TFT_WHITE);  // tip
+  const int fillw = pct * (bw - 4) / 100;
+  const uint16_t fc = (pct > 50) ? TFT_GREEN : (pct > 20 ? TFT_YELLOW : TFT_RED);
+  if (fillw > 0) M5.Display.fillRect(bx + 2, by + 2, fillw, bh - 4, fc);
+  if (chg) {  // charging bolt on the gauge
+    const int cx = bx + bw / 2, cy = by + bh / 2;
+    M5.Display.fillTriangle(cx + 2, by + 3, cx - 5, cy + 1, cx + 1, cy, TFT_BLACK);
+    M5.Display.fillTriangle(cx + 1, cy, cx + 6, by + bh - 3, cx - 1, cy - 1, TFT_BLACK);
+  }
+
+  // Label on the left (Korean).
+  M5.Display.setFont(&fonts::efontKR_16);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_WHITE);
+  M5.Display.setCursor(14, 14);
+  if (lvl < 0) M5.Display.print("배터리 정보 없음");
+  else if (chg) M5.Display.printf("배터리 %d%%  충전중", pct);
+  else M5.Display.printf("배터리 %d%%", pct);
+  M5.Display.setFont(&fonts::Font0);
+
+  delay(2500);
+  drawFace(curEmo, true);  // restore the face
+}
+
 void faceInit() {
   face = new M5Canvas(&M5.Display);
   face->setPsram(true);
@@ -561,7 +599,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v12 (reset-reason log + no WDT)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v13 (battery pull-down)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
@@ -619,12 +657,31 @@ void loop() {
       WiFi.reconnect();
     }
   }
-  bool touch = M5.Touch.getDetail().isPressed();
-  bool serialTrig = (Serial.available() && Serial.read() == 't');
-  if (touch) {
-    handleTurn(/*holdMode=*/true);
-    while (touchPressed()) delay(10);  // wait for release
-  } else if (serialTrig) {
+  auto td = M5.Touch.getDetail();
+  int serialCmd = Serial.available() ? Serial.read() : -1;
+  if (td.isPressed()) {
+    if (td.base_y < 40) {
+      // Top strip: a downward swipe pulls down the battery status (phone-style).
+      bool swiped = false;
+      while (true) {
+        M5.update();
+        auto d = M5.Touch.getDetail();
+        if (!d.isPressed()) break;
+        if (d.distanceY() > 50) { swiped = true; break; }
+        delay(10);
+      }
+      if (swiped) {
+        showBattery();
+        while (touchPressed()) delay(10);  // consume the rest of the gesture
+      }
+      // released at the top without swiping -> ignore (not a talk trigger)
+    } else {
+      handleTurn(/*holdMode=*/true);       // hold anywhere on the face to talk
+      while (touchPressed()) delay(10);     // wait for release
+    }
+  } else if (serialCmd == 'b') {
+    showBattery();                          // serial 'b' = show battery (testing)
+  } else if (serialCmd == 't') {
     handleTurn(/*holdMode=*/false);
   } else if (curEmo == EMO_NEUTRAL && millis() - lastBlink > 3500) {
     // Idle blink to keep the face alive.
