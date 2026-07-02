@@ -42,3 +42,13 @@
 - platformio.ini: M0 env는 build_src_filter로 분리 보존. 두 env 모두 pio run SUCCESS
   (RAM15.7%/Flash30.5%). esp_camera/I2S/멀티파트 링크 OK.
 - 미검증(실보드): ES8311 레지스터 init·I2S 클럭(드라이버 UNVERIFIED 배너). 카메라 핀은 보드 프로파일 일치.
+
+## 2026-07-03 · ALI-24 화면 브리지 Stage 1 (하트비트+프레임 push)
+- 게이트웨이(backend/app.py): 백그라운드 하트비트 루프 GET brain180 /api/robot/health
+  ROBOT_HEARTBEAT_INTERVAL(기본10s) → 🟢 online 유지. LLM_PROVIDER=brain180 & 토큰 있을 때만.
+- push_frame_to_brain180(): POST /api/robot/frame {image_base64(prefix무),media_type}, <5MB.
+- 신규 POST /api/frame(멀티파트 image 또는 raw body) → brain180 프레임 전달.
+- /api/see 는 캡처 프레임을 best-effort 로 최신화면에도 publish(턴 실패 안 시킴).
+- 펌웨어 main_waveshare.cpp: idle 타이머 FRAME_PUSH_INTERVAL_MS(기본2000)마다 /api/frame push.
+- 빌드: waveshare-s3-touch-lcd-35b + http 둘 다 pio run SUCCESS. py_compile OK.
+- 커밋 2b1319f, 브랜치 agent/embedded-engineer/aee95520 push. 실보드 검증은 하드웨어 확보 후.
