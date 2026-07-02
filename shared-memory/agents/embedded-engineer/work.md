@@ -69,3 +69,10 @@
 - 원인(가설): GC0308 SCCB가 CoreS3 단일 내부 I2C(port1)를 FT6336 터치+오디오 코덱과 공유. handleTurn 매 턴 esp_camera_init/deinit가 버스 재구성 -> deinit의 i2c_driver_delete가 M5 버스를 무너뜨려 첫 턴 후 터치 死. 로그의 `i2c_driver_delete(411) install error`가 그 충돌.
 - 조치: CAM_ENABLE 플래그 신설(기본0=오디오전용). 카메라 deinit 직후 M5.In_I2C.begin()으로 공유버스 회수. pio run -e cores3 SUCCESS. 커밋 f817e2b push.
 - 다음 판별: 카메라 OFF 상태로 flash -> 422 후 터치 재동작 되면 카메라 I2C가 원인 확정. 그 뒤 버스 handoff 고쳐 CAM_ENABLE=1 복귀.
+
+##  — 음성루프 OK, 카메라 재활성(버스 재사용)+생각중 애니 (v18)
+- 실기 로그: mic peak=8186/4906 (마이크 정상!), /api/see->200, 한국어 답변, 터치 재트리거 OK. v16(연속DMA)+v17(카메라off)로 음성루프 완성.
+- 관찰: 카메라 off인데 서버가 비전 답변("짧은머리 남성...") -> 서버가 이전 프레임/캐시 이미지 들고 있음. 실시간 비전엔 카메라 프레임 전송 필요.
+- v18 조치: (1) setupCamera 버스 재사용(release/i2c_driver_delete 제거, sccb_i2c_port로 M5 드라이버 공유) -> 버스 안 부숨=터치 안 죽음, 실패시 audio-only 폴백. CAM_ENABLE 기본1 복귀. (2) postSeeThinking: HTTP를 백그라운드 task로 돌리고 생각중 얼굴 애니(눈동자 좌우+깜빡). drawFace에 pupilDx/Dy override 추가. task 실패시 blocking 폴백.
+- pio run -e cores3 SUCCESS. 커밋 e42a3a6.
+- 미검증: 카메라 버스 재사용이 실기 터치 유지하는지, 캡쳐 표시, 생각중 애니 실동작. 다음 로그로 확인: [cam] init OK(reuse) / 캡쳐화면 / 생각중 눈 움직임 / 터치 유지.
