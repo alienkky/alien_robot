@@ -47,8 +47,15 @@ CoreS3는 **내부 I2C 버스(port 1) 하나**를 다음이 공유한다:
 
 > **v21~v23의 함정:** 캡처가 성공하고(`[cam] captured ... jpeg N bytes`) 마이크도 살아있어서 "됐다"고 착각하기 쉬움. 하지만 `esp_camera_deinit()`이 공유 I2C를 반쯤 부순 상태로 두면, **다음 루프의 `M5.update()`(FT6336 터치 I2C read)가 완료되지 않는 트랜잭션에서 블록 → 전체 루프 정지**. 워치독을 꺼놨기(`esp_task_wdt_deinit()`) 때문에 리부트도 안 되고 **영구 먹통**. 즉 "카메라 turn 성공" ≠ "안정". 성공 로그 그 다음의 **터치 재동작 + health 로그 지속**까지 확인해야 진짜 안정.
 
-### 카메라를 다시 켜기 전 반드시 풀어야 할 것
-`esp_camera_deinit()` 후 공유 I2C 버스를 **완전히 건강한 상태로** 되돌리는 절차가 실기로 증명돼야 함. 후보: deinit 후 I2C 핀 강제 릴리즈+재init, FT6336 터치 재init, 또는 카메라 turn 동안 워치독을 켜서 hang 시 자동 복구. 증명 전까지 `CAM_ENABLE=0` 유지.
+### v26 시도 — I2C 버스 리커버리로 프리즈 정면 대응 (카메라 ON 복귀)
+`esp_camera_deinit()` 후 `recoverSharedI2C()` 추가:
+1. `M5.In_I2C.release()` + `i2c_driver_delete(port1)` — 드라이버 완전 제거.
+2. **비트뱅** SCL 9펄스로 SDA 잡고 있는 슬레이브를 클럭아웃 + STOP (교과서 I2C bus recovery).
+3. `M5.In_I2C.begin()` — 깨끗한 버스에 M5 드라이버 재설치.
+→ 터치/오디오가 항상 건강한 버스를 돌려받아 다음 루프의 터치 read가 멈추지 않음.
+- 카메라는 여전히 `recordAudio()` 이후 on-demand → 마이크 무위험.
+- **미검증**: 실기에서 프리즈 재발 여부는 `[cam] shared I2C recovered` 로그 다음의 **터치 재동작 + health 지속**으로 확인.
+- 그래도 프리즈면 다음 카드: 카메라 turn 구간에 워치독(Task WDT ~10s, 애니 루프에서 feed)으로 hang 시 자동 리부트 복구.
 
 ---
 

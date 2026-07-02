@@ -48,16 +48,17 @@
 // Optional camera tuning knobs default here, so an older config_cores3.h that
 // predates them still builds (only WIFI_*, AI_SERVER_BASE_URL, DEVICE_TOKEN are
 // truly required). Override any of these in config_cores3.h to change them.
-// Master camera switch — OFF (stability first). CONFIRMED on hardware: with the
-// camera ON, esp_camera_deinit() leaves the shared internal I2C bus (port 1)
-// wedged, and because the watchdog is disabled, the very next M5.update() touch
-// read HANGS the whole loop — a permanent freeze ("잘 안 들렸어요" 화면에서 먹통).
-// The mic-safe ordering saved the mic, but NOT the touch/loop. The voice-only
-// builds (camera OFF) never froze. So until a freeze-free camera teardown is
-// PROVEN on the board, the camera stays off and the robot stays reliable.
-// Set CAM_ENABLE 1 in config_cores3.h only for isolated camera bring-up tests.
+// Master camera switch — ON, with the freeze finally addressed. The permanent
+// freeze was esp_camera_deinit() leaving the shared internal I2C bus (port 1)
+// wedged, so the next touch read stalled the loop. v26 adds recoverSharedI2C()
+// after every camera teardown: it drops the driver, bit-bangs the classic I2C
+// bus-recovery (clock SCL to free a stuck slave + STOP), then re-begins M5's
+// driver on a clean bus — so touch/audio always get a healthy bus back and the
+// loop can't hang. Camera is still inited on-demand AFTER recordAudio() so the
+// mic is never at risk. If a board still misbehaves, CAM_ENABLE 0 in
+// config_cores3.h falls back to the proven audio-only loop.
 #ifndef CAM_ENABLE
-#define CAM_ENABLE 0
+#define CAM_ENABLE 1
 #endif
 #ifndef CAM_SCCB_I2C_PORT
 #define CAM_SCCB_I2C_PORT 1
@@ -467,6 +468,40 @@ bool setupCamera() {
   return true;
 }
 
+// Full recovery of the shared internal I2C bus after a camera turn. THIS is the
+// fix for the freeze: esp_camera_deinit() could leave port 1 wedged (a slave —
+// GC0308/PMIC — holding SDA, or the driver in a half state), and the next touch
+// read would then stall the whole loop into a permanent freeze. So we:
+//   1) drop any driver on the port,
+//   2) bit-bang up to 9 SCL pulses to clock a stuck slave off SDA, then a STOP —
+//      the textbook I2C bus-recovery sequence,
+//   3) hand the freshly-clean pins back to M5's I2C driver.
+// After this, touch + audio codecs get a healthy bus and the loop never hangs.
+void recoverSharedI2C() {
+  const int kSdaPin = 12, kSclPin = 11;  // CoreS3 internal I2C (port 1)
+  M5.In_I2C.release();
+  i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));  // harmless if gone
+
+  // Clock the bus free: with SDA released (input), pulse SCL until the slave
+  // stops holding SDA low (or 9 tries — one full byte + ack).
+  pinMode(kSclPin, OUTPUT_OPEN_DRAIN);
+  pinMode(kSdaPin, INPUT_PULLUP);
+  digitalWrite(kSclPin, HIGH);
+  for (int i = 0; i < 9; i++) {
+    digitalWrite(kSclPin, LOW);  delayMicroseconds(5);
+    digitalWrite(kSclPin, HIGH); delayMicroseconds(5);
+    if (digitalRead(kSdaPin) == HIGH) break;  // slave let go — bus is free
+  }
+  // Emit a STOP condition (SDA low->high while SCL high) so masters resync.
+  pinMode(kSdaPin, OUTPUT_OPEN_DRAIN);
+  digitalWrite(kSdaPin, LOW);  delayMicroseconds(5);
+  digitalWrite(kSclPin, HIGH); delayMicroseconds(5);
+  digitalWrite(kSdaPin, HIGH); delayMicroseconds(5);
+
+  M5.In_I2C.begin();  // reinstall M5's driver on the now-clean bus (touch/audio)
+  Serial.println("[cam] shared I2C recovered (bus clocked free + re-begun)");
+}
+
 // Returns a FRESH frame. The DVP ring buffers hold frames captured earlier
 // (while idle), so we drop a couple of stale ones first — otherwise every turn
 // reuses the same old image. Caller must esp_camera_fb_return() the result.
@@ -770,11 +805,9 @@ void handleTurn(bool holdMode) {
       Serial.println("[cam] fb_get failed, audio-only");
     }
     esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
-    // esp_camera_deinit() drops the SCCB driver on the shared internal I2C bus
-    // (port 1) that also drives the FT6336 touch panel + audio codecs. Without
-    // re-establishing M5's ownership the touch panel goes dead after a turn
-    // ("잘 안 들렸어요" 화면에서 터치 무반응). Re-begin M5's bus so touch keeps working.
-    M5.In_I2C.begin();
+    // Recover the shared I2C bus so the next touch read cannot stall the loop
+    // (the permanent-freeze cause). See recoverSharedI2C().
+    recoverSharedI2C();
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
@@ -849,7 +882,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v25 (volume panel: swipe up from bottom)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v26 (camera ON + I2C bus-recovery = no freeze)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
