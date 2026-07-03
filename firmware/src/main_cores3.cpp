@@ -86,12 +86,14 @@ constexpr uint32_t kWatchdogTimeoutSec = 12;      // hard hang -> automatic rebo
 constexpr uint32_t kSeeHardRestartMs = 135000UL;  // HTTP timeout is 120s + margin
 constexpr int32_t kMinSpeechPeakForServer = 300;  // below this, STT returns 422 and camera/I2C risk is wasted
 constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a stale touch state
-constexpr uint32_t kStaleTouchRecoverMs = 500;    // retry I2C recovery while stale-pressed is ignored
+constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
+constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
 bool g_ignoreTouchUntilRelease = false;
 uint32_t g_lastStaleTouchRecover = 0;
+uint32_t g_staleTouchIgnoreStart = 0;
 
 void feedWatchdog() {
   esp_task_wdt_reset();
@@ -556,6 +558,7 @@ void waitForTouchReleaseBounded() {
   Serial.println("[touch] release wait timeout; ignoring stale pressed state until release");
   g_ignoreTouchUntilRelease = true;
   g_lastStaleTouchRecover = 0;
+  g_staleTouchIgnoreStart = millis();
 }
 
 // Records mic PCM into the PSRAM buffer. In holdMode, stops when the touch is
@@ -951,7 +954,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v28 (422/stale-touch recovery)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v29 (stale-touch soft unlock)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1035,16 +1038,18 @@ void loop() {
       g_ignoreTouchUntilRelease = false;
       Serial.println("[touch] stale pressed state cleared");
     } else {
+      if (millis() - g_staleTouchIgnoreStart > kStaleTouchSoftUnlockMs) {
+        g_ignoreTouchUntilRelease = false;
+        Serial.println("[touch] stale pressed soft-unlocked; waiting for next touch edge");
+      }
       if (cameraOk && millis() - g_lastStaleTouchRecover > kStaleTouchRecoverMs) {
         g_lastStaleTouchRecover = millis();
         Serial.println("[touch] stale pressed state; recovering I2C");
         recoverSharedI2C();
       }
-      delay(10);
-      return;
     }
   }
-  if (td.isPressed()) {
+  if (!g_ignoreTouchUntilRelease && td.wasPressed()) {
     if (td.base_y < 40) {
       // Top strip: a downward swipe pulls down the battery status (phone-style).
       bool swiped = false;
@@ -1058,10 +1063,7 @@ void loop() {
       }
       if (swiped) {
         showBattery();
-        while (touchPressed()) {
-          feedWatchdog();
-          delay(10);
-        }  // consume the rest of the gesture
+        waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
       // released at the top without swiping -> ignore (not a talk trigger)
     } else if (td.base_y > 200) {
@@ -1077,10 +1079,7 @@ void loop() {
       }
       if (swiped) {
         showVolumeControl();
-        while (touchPressed()) {
-          feedWatchdog();
-          delay(10);
-        }  // consume the rest of the gesture
+        waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
       // tap at the bottom without swiping up -> ignore (not a talk trigger)
     } else {
