@@ -121,3 +121,12 @@
 - Implemented v27 in `firmware/src/main_cores3.cpp`: re-enable task watchdog, feed it in normal long loops, hard restart `/api/see` if the background request exceeds 135s, and run a final `recoverSharedI2C()` on empty response/bad JSON/success before returning idle.
 - Boot log now says `route-A v27 (timeout recovery + watchdog)`. Expected if hang recurs: automatic reboot with `last reset reason = TASK_WDT`, not permanent freeze.
 - Build not run in this runtime: no `pio` executable and no `platformio` Python module installed.
+## 2026-07-03 - ALI-21 fast-thinking recommendation
+- User asked how to reduce long "thinking" time. Current evidence says the fast path is text/audio-only (~5.2s observed), while image-attached vision goes through local vLLM and is the slow/failing path (502 local vLLM 400 or timeout).
+- Recommended next firmware/server direction: v28 fast mode = default voice/text-only turns, attach camera only on explicit visual intent ("look", "photo", "what is this"), optionally reuse a cached last scene, compress/cap images, and add server per-stage timing/faster vision backend.
+## 2026-07-03 - ALI-21 v27 field log review
+- User provided v27 field logs. Camera capture succeeds (`GC0308 init OK`, JPEG 6-8 KB) and `recoverSharedI2C()` runs after camera and after empty response. Health logs continue after "server slow", then device re-enters listening, so the v27 freeze guard appears effective.
+- Real failures in the log: first turn `/api/see -> -11 (56964ms)` = vision/server timeout around the 60s boundary despite firmware code intending 120s; second turn `/api/see -> 422 (3244ms)` with `peak=109 gain=10x` = audio too quiet / STT rejected, not a server outage.
+## 2026-07-03 - ALI-21 v28 422/stale-touch recovery
+- User clarified that touch freezes after the "could not hear you" message. Implemented v28: local low-speech gate skips camera/server when pre-gain mic peak <300, final I2C recovery after error message drawing, and bounded post-turn touch release wait with stale-pressed ignore + periodic I2C recovery.
+- `git diff --check` passed. Build not run in this runtime: `pio` missing and `python -m platformio` unavailable.

@@ -84,9 +84,14 @@ Preferences g_prefs;                      // NVS store — persists the volume
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
 constexpr uint32_t kWatchdogTimeoutSec = 12;      // hard hang -> automatic reboot
 constexpr uint32_t kSeeHardRestartMs = 135000UL;  // HTTP timeout is 120s + margin
+constexpr int32_t kMinSpeechPeakForServer = 300;  // below this, STT returns 422 and camera/I2C risk is wasted
+constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a stale touch state
+constexpr uint32_t kStaleTouchRecoverMs = 500;    // retry I2C recovery while stale-pressed is ignored
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
+bool g_ignoreTouchUntilRelease = false;
+uint32_t g_lastStaleTouchRecover = 0;
 
 void feedWatchdog() {
   esp_task_wdt_reset();
@@ -540,6 +545,19 @@ bool touchPressed() {
   return M5.Touch.getDetail().isPressed();
 }
 
+void waitForTouchReleaseBounded() {
+  const uint32_t start = millis();
+  while (millis() - start < kTouchReleaseWaitMs) {
+    M5.update();
+    feedWatchdog();
+    if (!M5.Touch.getDetail().isPressed()) return;
+    delay(10);
+  }
+  Serial.println("[touch] release wait timeout; ignoring stale pressed state until release");
+  g_ignoreTouchUntilRelease = true;
+  g_lastStaleTouchRecover = 0;
+}
+
 // Records mic PCM into the PSRAM buffer. In holdMode, stops when the touch is
 // released; otherwise records the full window (used by the serial trigger).
 // Returns the number of int16 samples captured.
@@ -583,7 +601,7 @@ size_t recordAudio(bool holdMode) {
 // Auto-amplify the recorded PCM toward a target peak so quiet mic audio isn't
 // dropped by the server's speech detector (the cause of the /api/see 422). The
 // logged peak also tells us if the mic captured anything at all.
-void applyMicGain(int16_t *buf, size_t n) {
+int32_t applyMicGain(int16_t *buf, size_t n) {
   int32_t peak = 0;
   int16_t s0 = n > 0 ? buf[0] : 0, s1 = n > 1 ? buf[1] : 0;
   int16_t s2 = n > 2 ? buf[2] : 0, s3 = n > 3 ? buf[3] : 0;  // raw, pre-gain
@@ -604,6 +622,7 @@ void applyMicGain(int16_t *buf, size_t n) {
   // the codec delivered pure silence (hardware/mute), not just a quiet room.
   Serial.printf("[mic] peak=%d gain=%dx raw=[%d %d %d %d]\n",
                 static_cast<int>(peak), gain, s0, s1, s2, s3);
+  return peak;
 }
 
 // Plays a WAV body on the speaker: parse the sample rate from the 44-byte
@@ -814,7 +833,13 @@ void handleTurn(bool holdMode) {
     faceSay(EMO_NEUTRAL, "너무 짧아요 — 길게 말해줘");
     return;
   }
-  applyMicGain(pcm, samples);  // boost quiet audio so STT hears it
+  int32_t micPeak = applyMicGain(pcm, samples);  // boost quiet audio so STT hears it
+  if (micPeak < kMinSpeechPeakForServer) {
+    Serial.printf("[turn] speech too quiet (peak=%d < %d), skip camera/server\n",
+                  static_cast<int>(micPeak), static_cast<int>(kMinSpeechPeakForServer));
+    faceSay(EMO_NEUTRAL, "소리가 작아요 — 다시 말해줘");
+    return;
+  }
 
   // Camera is optional. When available: grab one frame, SHOW it on the display
   // ("what the robot saw"), then software-encode it to JPEG for the upload.
@@ -857,6 +882,10 @@ void handleTurn(bool holdMode) {
     else if (g_seeCode == -11) faceSay(EMO_NEUTRAL, "서버가 느려요 — 다시 말해줘");
     else if (g_seeCode == -1 || g_seeCode == 0) faceSay(EMO_SAD, "서버 연결 안됨");
     else faceSay(EMO_SAD, "서버 문제 (다시 시도)");
+    if (cameraOk) {
+      Serial.println("[turn] final I2C recovery after error message");
+      recoverSharedI2C();
+    }
     return;
   }
 
@@ -865,6 +894,10 @@ void handleTurn(bool holdMode) {
     Serial.println("[turn] bad JSON response");
     if (cameraOk) recoverSharedI2C();
     faceSay(EMO_SAD, "응답 오류");
+    if (cameraOk) {
+      Serial.println("[turn] final I2C recovery after JSON error message");
+      recoverSharedI2C();
+    }
     return;
   }
   const char *transcript = doc["transcript"] | "";
@@ -918,7 +951,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v27 (timeout recovery + watchdog)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v28 (422/stale-touch recovery)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -997,6 +1030,20 @@ void loop() {
   }
   auto td = M5.Touch.getDetail();
   int serialCmd = Serial.available() ? Serial.read() : -1;
+  if (g_ignoreTouchUntilRelease) {
+    if (!td.isPressed()) {
+      g_ignoreTouchUntilRelease = false;
+      Serial.println("[touch] stale pressed state cleared");
+    } else {
+      if (cameraOk && millis() - g_lastStaleTouchRecover > kStaleTouchRecoverMs) {
+        g_lastStaleTouchRecover = millis();
+        Serial.println("[touch] stale pressed state; recovering I2C");
+        recoverSharedI2C();
+      }
+      delay(10);
+      return;
+    }
+  }
   if (td.isPressed()) {
     if (td.base_y < 40) {
       // Top strip: a downward swipe pulls down the battery status (phone-style).
@@ -1038,10 +1085,7 @@ void loop() {
       // tap at the bottom without swiping up -> ignore (not a talk trigger)
     } else {
       handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
-      while (touchPressed()) {
-        feedWatchdog();
-        delay(10);
-      }     // wait for release
+      waitForTouchReleaseBounded();         // wait for release, but never forever
     }
   } else if (serialCmd == 'b') {
     showBattery();                          // serial 'b' = show battery (testing)

@@ -91,3 +91,9 @@ CoreS3는 **내부 I2C 버스(port 1) 하나**를 다음이 공유한다:
 - `/api/see` 백그라운드 task가 135초를 넘기면 `ESP.restart()`로 강제 복구. HTTP read timeout 120초보다 여유를 둔 hard limit.
 - `resp.isEmpty()` / bad JSON / 성공 후 playback 종료 시점에 `recoverSharedI2C()`를 한 번 더 호출해서 idle 복귀 전 touch bus를 재정리.
 - 기대 로그: 부팅 `route-A v27`, `[wdt] armed (12s)`. 만약 여전히 멈추면 다음 부팅 `last reset reason = TASK_WDT (watchdog)`가 찍혀 영구 먹통 대신 자동복구됨을 확인.
+
+### v28 — 422 뒤 stale touch 먹통 방지
+사용자 재현: `잘 안 들렸어요, 다시 말해줘`가 뜬 뒤 터치가 다시 먹통. 직전 로그는 `/api/see -> 422`와 `peak=109 gain=10x`.
+- 원인 후보: 너무 작은 녹음도 카메라/서버 경로를 탔고, 카메라 I2C 복구 뒤 post-turn `while (touchPressed())`가 stale pressed 상태를 영원히 release 대기. 이 루프는 watchdog을 feed하므로 리셋도 안 되어 영구 먹통처럼 보일 수 있음.
+- 규칙: pre-gain mic peak가 로컬 기준보다 낮으면 카메라와 `/api/see`를 호출하지 말고 로컬에서 "소리가 작아요"로 끝낸다.
+- 규칙: 카메라/서버 turn 뒤 터치 release 대기는 반드시 bounded wait로 한다. timeout이면 stale pressed 상태를 무시하고, release가 관측될 때까지 주기적으로 I2C recovery를 재시도한다.
