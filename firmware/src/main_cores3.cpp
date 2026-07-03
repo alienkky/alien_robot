@@ -81,6 +81,8 @@ constexpr size_t kRecordChunk = 512;   // samples per M5.Mic.record() call
 constexpr uint8_t kDefaultVolume = 160; // 0..255 default (2x the original 80)
 uint8_t g_speakerVolume = kDefaultVolume; // runtime, user-adjustable via the panel
 Preferences g_prefs;                      // NVS store — persists the volume
+String g_wifiSsid;                         // optional NVS override; blank = config_cores3.h
+String g_wifiPass;                         // optional NVS override; never printed
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
 constexpr uint32_t kWatchdogTimeoutSec = 12;      // hard hang -> automatic reboot
 constexpr uint32_t kSeeHardRestartMs = 135000UL;  // HTTP timeout is 120s + margin
@@ -95,6 +97,8 @@ bool g_ignoreTouchUntilRelease = false;
 bool g_queueImmediateTurn = false;
 uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
+
+void connectWifi();
 
 void feedWatchdog() {
   esp_task_wdt_reset();
@@ -386,6 +390,266 @@ void volumeBeep() {
   M5.Speaker.tone(880, 90);  // async 90ms tone
 }
 
+bool hitRect(int px, int py, int x, int y, int w, int h) {
+  return px >= x && px <= x + w && py >= y && py <= y + h;
+}
+
+void drawButton(int x, int y, int w, int h, const char *label,
+                uint16_t border = TFT_WHITE, uint16_t text = TFT_WHITE) {
+  M5.Display.drawRoundRect(x, y, w, h, 6, border);
+  M5.Display.setFont(&fonts::Font0);
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(text);
+  const int tw = M5.Display.textWidth(label);
+  M5.Display.setCursor(x + (w - tw) / 2, y + h / 2 - 4);
+  M5.Display.print(label);
+}
+
+const char *activeWifiSsid() {
+  return g_wifiSsid.length() > 0 ? g_wifiSsid.c_str() : WIFI_SSID;
+}
+
+const char *activeWifiPass() {
+  return g_wifiSsid.length() > 0 ? g_wifiPass.c_str() : WIFI_PASSWORD;
+}
+
+void loadWifiCredentials() {
+  g_wifiSsid = g_prefs.getString("wifi_ssid", "");
+  g_wifiPass = g_prefs.getString("wifi_pass", "");
+  Serial.printf("[boot] wifi source = %s, ssid = %s\n",
+                g_wifiSsid.length() > 0 ? "saved" : "config",
+                activeWifiSsid());
+}
+
+void saveWifiCredentials(const String &ssid, const String &pass) {
+  g_wifiSsid = ssid;
+  g_wifiPass = pass;
+  g_prefs.putString("wifi_ssid", g_wifiSsid);
+  g_prefs.putString("wifi_pass", g_wifiPass);
+  Serial.printf("[wifi] saved ssid = %s\n", g_wifiSsid.c_str());
+}
+
+bool editWifiPassword(const String &ssid, String &pass) {
+  const int w = M5.Display.width();
+  const int keyW = 28, keyH = 26, gap = 3;
+  const int row1Y = 72, row2Y = 102, row3Y = 132;
+  const int bottomY = 188, bottomH = 40;
+  int mode = 0;  // 0 lower, 1 upper, 2 number/symbol
+  const char *lowerRows[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
+  const char *upperRows[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
+  const char *symRows[] = {"0123456789", "-_.@#$!?/", "%&*=+~"};
+
+  auto rowText = [&]() -> const char ** {
+    if (mode == 1) return upperRows;
+    if (mode == 2) return symRows;
+    return lowerRows;
+  };
+
+  auto masked = [&]() {
+    String s = "";
+    const int keep = pass.length() > 26 ? 26 : pass.length();
+    for (int i = 0; i < keep; i++) s += '*';
+    if (pass.length() > keep) s += "...";
+    return s;
+  };
+
+  auto redraw = [&]() {
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.setCursor(8, 8);
+    M5.Display.print("WiFi password");
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(8, 26);
+    M5.Display.printf("SSID: %.28s", ssid.c_str());
+    M5.Display.setCursor(8, 44);
+    M5.Display.printf("PASS: %s", pass.length() ? masked().c_str() : "(open)");
+
+    const char **rows = rowText();
+    const int starts[] = {6, 20, 48};
+    const int ys[] = {row1Y, row2Y, row3Y};
+    for (int r = 0; r < 3; r++) {
+      for (int i = 0; rows[r][i]; i++) {
+        int x = starts[r] + i * (keyW + gap);
+        char label[2] = {rows[r][i], 0};
+        drawButton(x, ys[r], keyW, keyH, label, TFT_DARKGREY, TFT_WHITE);
+      }
+    }
+
+    drawButton(6, bottomY, 48, bottomH, mode == 0 ? "abc" : (mode == 1 ? "ABC" : "123"), TFT_CYAN, TFT_CYAN);
+    drawButton(60, bottomY, 70, bottomH, "SPACE", TFT_WHITE, TFT_WHITE);
+    drawButton(136, bottomY, 48, bottomH, "DEL", TFT_YELLOW, TFT_YELLOW);
+    drawButton(190, bottomY, 58, bottomH, "OK", TFT_GREEN, TFT_GREEN);
+    drawButton(254, bottomY, 60, bottomH, "CANCEL", TFT_RED, TFT_RED);
+  };
+
+  auto addKeyFromRow = [&](const char *row, int startX, int rowY, int x, int y) {
+    if (y < rowY || y > rowY + keyH) return false;
+    for (int i = 0; row[i]; i++) {
+      int kx = startX + i * (keyW + gap);
+      if (hitRect(x, y, kx, rowY, keyW, keyH)) {
+        if (pass.length() < 63) pass += row[i];
+        return true;
+      }
+    }
+    return false;
+  };
+
+  redraw();
+  uint32_t lastAct = millis();
+  while (true) {
+    M5.update();
+    feedWatchdog();
+    auto d = M5.Touch.getDetail();
+    if (d.wasPressed()) {
+      const int x = d.x, y = d.y;
+      bool changed = false;
+      if (hitRect(x, y, 6, bottomY, 48, bottomH)) {
+        mode = (mode + 1) % 3;
+        changed = true;
+      } else if (hitRect(x, y, 60, bottomY, 70, bottomH)) {
+        if (pass.length() < 63) pass += ' ';
+        changed = true;
+      } else if (hitRect(x, y, 136, bottomY, 48, bottomH)) {
+        if (pass.length() > 0) pass.remove(pass.length() - 1);
+        changed = true;
+      } else if (hitRect(x, y, 190, bottomY, 58, bottomH)) {
+        return true;
+      } else if (hitRect(x, y, 254, bottomY, 60, bottomH)) {
+        return false;
+      } else {
+        const char **rows = rowText();
+        changed = addKeyFromRow(rows[0], 6, row1Y, x, y) ||
+                  addKeyFromRow(rows[1], 20, row2Y, x, y) ||
+                  addKeyFromRow(rows[2], 48, row3Y, x, y);
+      }
+      if (changed) {
+        redraw();
+        lastAct = millis();
+      }
+    }
+    if (millis() - lastAct > 30000) return false;
+    delay(20);
+  }
+}
+
+void showWifiSettings() {
+  const int w = M5.Display.width();
+  const int rowX = 10, rowW = w - 20, rowH = 34, firstRowY = 50;
+  const int rowsPerPage = 4;
+  int page = 0;
+  int networks = 0;
+
+  auto drawScanning = [&]() {
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.setCursor(12, 18);
+    M5.Display.print("WiFi scanning...");
+  };
+
+  auto scan = [&]() {
+    drawScanning();
+    feedWatchdog();
+    networks = WiFi.scanNetworks(false, true);
+    page = 0;
+    Serial.printf("[wifi] scan found %d networks\n", networks);
+  };
+
+  auto redraw = [&]() {
+    M5.Display.fillScreen(TFT_BLACK);
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_CYAN);
+    M5.Display.setCursor(8, 8);
+    M5.Display.print("WiFi setup");
+    M5.Display.setTextColor(TFT_WHITE);
+    M5.Display.setCursor(8, 26);
+    M5.Display.printf("Current: %.24s", activeWifiSsid());
+
+    const int start = page * rowsPerPage;
+    for (int i = 0; i < rowsPerPage; i++) {
+      const int idx = start + i;
+      const int y = firstRowY + i * (rowH + 4);
+      if (idx >= networks) {
+        M5.Display.drawRoundRect(rowX, y, rowW, rowH, 6, TFT_DARKGREY);
+        continue;
+      }
+      const String ssid = WiFi.SSID(idx);
+      const int32_t rssi = WiFi.RSSI(idx);
+      const bool locked = WiFi.encryptionType(idx) != WIFI_AUTH_OPEN;
+      M5.Display.drawRoundRect(rowX, y, rowW, rowH, 6, TFT_WHITE);
+      M5.Display.setCursor(rowX + 8, y + 8);
+      M5.Display.printf("%c %.21s  %ld", locked ? '*' : ' ', ssid.c_str(), static_cast<long>(rssi));
+    }
+
+    drawButton(8, 206, 64, 28, "BACK", TFT_RED, TFT_RED);
+    drawButton(82, 206, 72, 28, "RESCAN", TFT_WHITE, TFT_WHITE);
+    drawButton(164, 206, 64, 28, "NEXT", TFT_CYAN, TFT_CYAN);
+    drawButton(238, 206, 74, 28, "CLEAR", TFT_YELLOW, TFT_YELLOW);
+  };
+
+  scan();
+  redraw();
+  uint32_t lastAct = millis();
+  while (true) {
+    M5.update();
+    feedWatchdog();
+    auto d = M5.Touch.getDetail();
+    if (d.wasPressed()) {
+      const int x = d.x, y = d.y;
+      if (hitRect(x, y, 8, 206, 64, 28)) {
+        break;
+      } else if (hitRect(x, y, 82, 206, 72, 28)) {
+        WiFi.scanDelete();
+        scan();
+        redraw();
+      } else if (hitRect(x, y, 164, 206, 64, 28)) {
+        const int maxPage = networks > 0 ? (networks - 1) / rowsPerPage : 0;
+        page = (page >= maxPage) ? 0 : page + 1;
+        redraw();
+      } else if (hitRect(x, y, 238, 206, 74, 28)) {
+        g_prefs.remove("wifi_ssid");
+        g_prefs.remove("wifi_pass");
+        g_wifiSsid = "";
+        g_wifiPass = "";
+        Serial.println("[wifi] saved credentials cleared; using config");
+        redraw();
+      } else {
+        for (int i = 0; i < rowsPerPage; i++) {
+          const int idx = page * rowsPerPage + i;
+          const int rowY = firstRowY + i * (rowH + 4);
+          if (idx < networks && hitRect(x, y, rowX, rowY, rowW, rowH)) {
+            String ssid = WiFi.SSID(idx);
+            String pass = (ssid == g_wifiSsid) ? g_wifiPass : "";
+            if (editWifiPassword(ssid, pass)) {
+              saveWifiCredentials(ssid, pass);
+              WiFi.scanDelete();
+              M5.Display.fillScreen(TFT_BLACK);
+              M5.Display.setCursor(12, 18);
+              M5.Display.setTextColor(TFT_CYAN);
+              M5.Display.print("Connecting saved WiFi...");
+              WiFi.disconnect(false, false);
+              delay(200);
+              connectWifi();
+              delay(900);
+              return;
+            }
+            redraw();
+            break;
+          }
+        }
+      }
+      lastAct = millis();
+    }
+    if (millis() - lastAct > 30000) break;
+    delay(20);
+  }
+  WiFi.scanDelete();
+}
+
 // Phone-style pull-UP panel (mirror of the top battery pull-down): adjust the
 // TTS playback volume. Tap the bar to set a level, use −/+ for fine steps, tap
 // "완료" (or 6s idle) to close. The new level is previewed with a beep and saved
@@ -395,6 +659,7 @@ void showVolumeControl() {
   const int barX = 24, barW = w - 48, barY = 90, barH = 40;
   const int btnW = 70, btnH = 50, btnY = h - btnH - 8;
   const int minusX = 16, plusX = w - 16 - btnW, doneX = w / 2 - btnW / 2;
+  const int wifiX = w - 84, wifiY = 10, wifiW = 68, wifiH = 30;
 
   M5.Speaker.begin();                 // grab I2S for the preview beeps
   M5.Speaker.setVolume(g_speakerVolume);
@@ -407,6 +672,7 @@ void showVolumeControl() {
     M5.Display.setTextColor(TFT_CYAN);
     M5.Display.setCursor(20, 14);
     M5.Display.print("음량 조절");
+    drawButton(wifiX, wifiY, wifiW, wifiH, "WiFi", TFT_CYAN, TFT_CYAN);
     M5.Display.setTextColor(TFT_WHITE);
     M5.Display.setTextSize(2);
     M5.Display.setCursor(w / 2 - 30, 40);
@@ -438,7 +704,15 @@ void showVolumeControl() {
     if (d.wasPressed()) {
       const int x = d.x, y = d.y;
       bool changed = false, done = false;
-      if (y >= btnY && y <= btnY + btnH) {          // button row
+      if (hitRect(x, y, wifiX, wifiY, wifiW, wifiH)) {
+        M5.Speaker.end();
+        showWifiSettings();
+        M5.Speaker.begin();
+        M5.Speaker.setVolume(g_speakerVolume);
+        redraw();
+        lastAct = millis();
+        continue;
+      } else if (y >= btnY && y <= btnY + btnH) {          // button row
         if (x >= minusX && x <= minusX + btnW) {
           g_speakerVolume = (g_speakerVolume <= 15) ? 0 : g_speakerVolume - 15;
           changed = true;
@@ -972,7 +1246,10 @@ void connectWifi() {
   WiFi.persistent(false);
   WiFi.setAutoReconnect(true);
   WiFi.setSleep(false);  // stop the idle drop/re-associate cycle (a reboot trigger)
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  const char *ssid = activeWifiSsid();
+  const char *pass = activeWifiPass();
+  if (strlen(pass) > 0) WiFi.begin(ssid, pass);
+  else WiFi.begin(ssid);
   Serial.print("WiFi connecting");
   faceSay(EMO_NEUTRAL, "WiFi 연결 중...");
   uint32_t start = millis();
@@ -984,9 +1261,10 @@ void connectWifi() {
   if (WiFi.status() == WL_CONNECTED) {
     // Lower TX power trims the current spikes that brown-out the board on TX.
     WiFi.setTxPower(WIFI_POWER_13dBm);
-    Serial.printf("\nWiFi connected: %s (tx 13dBm)\n", WiFi.localIP().toString().c_str());
+    Serial.printf("\nWiFi connected: %s (tx 13dBm, ssid=%s)\n",
+                  WiFi.localIP().toString().c_str(), ssid);
   } else {
-    Serial.println("\nWiFi FAILED (check config_cores3.h)");
+    Serial.printf("\nWiFi FAILED (ssid=%s)\n", ssid);
     faceSay(EMO_SAD, "WiFi 실패");
   }
 }
@@ -1007,13 +1285,14 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v30 (answer touch interrupt)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v31 (wifi setup panel)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
   g_prefs.begin("robot", false);
   g_speakerVolume = g_prefs.getUChar("vol", kDefaultVolume);
   Serial.printf("[boot] volume = %d (%d%%)\n", g_speakerVolume, g_speakerVolume * 100 / 255);
+  loadWifiCredentials();
 
   // Log WHY it last rebooted — this pins down the "turns off and back on" cause:
   // PANIC = code crash, BROWNOUT = power sag, TASK_WDT/INT_WDT = watchdog.
