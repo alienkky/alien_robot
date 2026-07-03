@@ -51,3 +51,4 @@
 ## 2026-07-03 - Watchdog is required for CoreS3 camera/touch recovery
 - For CoreS3 camera experiments, leaving `esp_task_wdt_deinit()` in production firmware hides real I2C/touch wedges as permanent freezes. Keep a watched loop task and feed only known-good long loops.
 - For `/api/see`, a UI animation loop can keep the board alive while the HTTP task runs, but a hard upper bound is still needed. If the background request never returns, reboot deliberately rather than preserving dangling audio/jpeg pointers.
+2026-07-03: Before this patch, `LLM_PROVIDER=openai` in `alien_robot/backend/app.py` still used the vLLM-compatible text-only function, and `/api/see` hard-rejected every provider except `brain180`. That made an OpenAI meeting fallback impossible without a code change.

@@ -130,3 +130,4 @@
 ## 2026-07-03 - ALI-21 v28 422/stale-touch recovery
 - User clarified that touch freezes after the "could not hear you" message. Implemented v28: local low-speech gate skips camera/server when pre-gain mic peak <300, final I2C recovery after error message drawing, and bounded post-turn touch release wait with stale-pressed ignore + periodic I2C recovery.
 - `git diff --check` passed. Build not run in this runtime: `pio` missing and `python -m platformio` unavailable.
+2026-07-03: ALI-21 urgent meeting fallback. Patched `backend/app.py` so `LLM_PROVIDER=openai` directly calls OpenAI Chat Completions from the gateway and forwards `/api/see` JPEG frames with `detail=low`. Updated `backend/config.example.env` with OpenAI fallback envs. Syntax check passed with `python -m py_compile backend/app.py`; runtime smoke blocked by missing local backend dependencies.

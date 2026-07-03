@@ -36,3 +36,4 @@
 - 팬틸트 서보는 미포함(StackChan 키트만) → 음성+비전 MVP엔 무관, 서보는 나중 Port 추가.
 - 펌웨어 경로: (A·권장) PlatformIO env `cores3` + M5Unified(화면/오디오) + esp_camera(GC0308) + 기존 turn 로직 재사용 → Brain180 /api/see 유지. (B) 공식 xiaozhi CoreS3 프로파일(스모크/ WS백엔드).
 - 대기: 기영님 답 (1)보드 보유/주문 여부 (2)A 진행 여부. "A 시작"이면 main_cores3.cpp + cores3 env 작성 예정.
+2026-07-03: For the urgent Dr. Ahn meeting path, use gateway `LLM_PROVIDER=openai` as a temporary cloud fallback. Keep `brain180` and local `vllm` paths intact for the privacy/local-inference track after the demo.
