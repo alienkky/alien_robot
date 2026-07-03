@@ -92,6 +92,7 @@ constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
 bool g_ignoreTouchUntilRelease = false;
+bool g_queueImmediateTurn = false;
 uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
 
@@ -297,13 +298,38 @@ void faceSay(Emotion e, const char *text, bool showBubble = false) {
 
 // Lip-sync the mouth AND stream the caption text out (auto-scrolling) while the
 // speaker plays. durationMs paces the reveal so the text finishes ~with the audio.
-void animateMouthWhilePlaying(uint32_t durationMs) {
+bool pollAnswerInterruptTouch() {
+  M5.update();
+  feedWatchdog();
+  auto d = M5.Touch.getDetail();
+  if (d.wasPressed()) {
+    Serial.println("[touch] answer interrupted; queueing new turn");
+    g_queueImmediateTurn = true;
+    return true;
+  }
+  return false;
+}
+
+bool waitAnswerInterruptWindow(uint32_t durationMs) {
+  const uint32_t startT = millis();
+  while (millis() - startT < durationMs) {
+    if (pollAnswerInterruptTouch()) return true;
+    delay(30);
+  }
+  return false;
+}
+
+// Returns true when the user tapped during the answer and a new turn was queued.
+bool animateMouthWhilePlaying(uint32_t durationMs) {
   const int total = countGlyphs(faceText);
   const uint32_t startT = millis();
   uint32_t lastMouth = 0;
   bool open = false;
   while (M5.Speaker.isPlaying()) {
     feedWatchdog();
+    if (pollAnswerInterruptTouch()) {
+      return true;
+    }
     const uint32_t el = millis() - startT;
     int reveal = (durationMs > 0) ? static_cast<int>((uint64_t)total * el / durationMs) : total;
     if (reveal > total) reveal = total;
@@ -312,6 +338,7 @@ void animateMouthWhilePlaying(uint32_t durationMs) {
     delay(30);
   }
   drawFace(curEmo, true, 0, total);  // full text, mouth closed
+  return false;
 }
 
 // Phone-style pull-down status: a top bar with a battery gauge, % and a charging
@@ -630,8 +657,8 @@ int32_t applyMicGain(int16_t *buf, size_t n) {
 
 // Plays a WAV body on the speaker: parse the sample rate from the 44-byte
 // header, skip the header, stream the PCM to the AW88298 via M5.Speaker.
-void playWav(const uint8_t *wav, size_t len) {
-  if (len <= 44) return;
+bool playWav(const uint8_t *wav, size_t len) {
+  if (len <= 44) return false;
   uint32_t rate = static_cast<uint32_t>(wav[24]) | (static_cast<uint32_t>(wav[25]) << 8) |
                   (static_cast<uint32_t>(wav[26]) << 16) | (static_cast<uint32_t>(wav[27]) << 24);
   if (rate < 8000 || rate > 48000) rate = kSampleRate;  // fall back if not a std WAV
@@ -644,8 +671,9 @@ void playWav(const uint8_t *wav, size_t len) {
   M5.Speaker.playRaw(samples, n, rate, false);
   // Stream the caption + lip-sync, paced to the audio length.
   const uint32_t durationMs = (rate > 0) ? static_cast<uint32_t>((uint64_t)n * 1000 / rate) : 0;
-  animateMouthWhilePlaying(durationMs);
+  bool interrupted = animateMouthWhilePlaying(durationMs);
   M5.Speaker.end();
+  return interrupted;
 }
 
 // Begins an HTTP(S) request. For https URLs (free tunnels like cloudflared/
@@ -787,11 +815,12 @@ String postSeeThinking(const uint8_t *audio, size_t audioLen,
 }
 
 // Fetches audio_url (relative to the gateway) into PSRAM and plays it.
-void fetchAndPlay(const String &audioUrl) {
-  if (audioUrl.isEmpty()) return;
+bool fetchAndPlay(const String &audioUrl) {
+  if (audioUrl.isEmpty()) return waitAnswerInterruptWindow(2500);
   HTTPClient http;
   WiFiClientSecure secure;
   WiFiClient plain;
+  bool interrupted = false;
   // audioUrl may be a full https URL or a path relative to the gateway base.
   String full = audioUrl.startsWith("http") ? audioUrl : (String(AI_SERVER_BASE_URL) + audioUrl);
   httpBegin(http, secure, plain, full);
@@ -808,18 +837,28 @@ void fetchAndPlay(const String &audioUrl) {
         int got = 0;
         while (http.connected() && got < len) {
           feedWatchdog();
+          if (pollAnswerInterruptTouch()) {
+            interrupted = true;
+            break;
+          }
           int avail = stream->available();
           if (avail > 0) got += stream->readBytes(wav + got, min(avail, len - got));
           else delay(1);
         }
-        playWav(wav, got);
+        if (!interrupted) interrupted = playWav(wav, got);
         free(wav);
+      } else {
+        interrupted = waitAnswerInterruptWindow(1500);
       }
+    } else {
+      interrupted = waitAnswerInterruptWindow(1500);
     }
   } else {
     Serial.printf("[http] audio GET -> %d\n", code);
+    interrupted = waitAnswerInterruptWindow(1500);
   }
   http.end();
+  return interrupted;
 }
 
 void handleTurn(bool holdMode) {
@@ -909,9 +948,23 @@ void handleTurn(bool holdMode) {
   Serial.printf("[turn] you: %s\n[turn] bot: %s\n", transcript, answer);
   // Happy face + speech bubble (only now, while talking) with the answer.
   faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
-  fetchAndPlay(String(audioUrl));
+  if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
+    waitAnswerInterruptWindow(800);
+  }
   if (cameraOk) recoverSharedI2C();
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
+}
+
+void runQueuedImmediateTurns(uint8_t maxTurns = 2) {
+  for (uint8_t i = 0; i < maxTurns && g_queueImmediateTurn; i++) {
+    g_queueImmediateTurn = false;
+    Serial.println("[turn] starting queued touch turn");
+    handleTurn(/*holdMode=*/false);
+  }
+  if (g_queueImmediateTurn) {
+    Serial.println("[turn] queued touch turn limit reached; dropping extra request");
+    g_queueImmediateTurn = false;
+  }
 }
 
 void connectWifi() {
@@ -954,7 +1007,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v29 (stale-touch soft unlock)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v30 (answer touch interrupt)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1049,6 +1102,12 @@ void loop() {
       }
     }
   }
+  if (g_queueImmediateTurn) {
+    runQueuedImmediateTurns();
+    waitForTouchReleaseBounded();
+    delay(10);
+    return;
+  }
   if (!g_ignoreTouchUntilRelease && td.wasPressed()) {
     if (td.base_y < 40) {
       // Top strip: a downward swipe pulls down the battery status (phone-style).
@@ -1084,6 +1143,7 @@ void loop() {
       // tap at the bottom without swiping up -> ignore (not a talk trigger)
     } else {
       handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
+      runQueuedImmediateTurns();
       waitForTouchReleaseBounded();         // wait for release, but never forever
     }
   } else if (serialCmd == 'b') {
@@ -1092,6 +1152,7 @@ void loop() {
     showVolumeControl();                    // serial 'v' = volume panel (testing)
   } else if (serialCmd == 't') {
     handleTurn(/*holdMode=*/false);
+    runQueuedImmediateTurns();
   } else if (curEmo == EMO_NEUTRAL && millis() - lastBlink > 3500) {
     // Idle blink to keep the face alive.
     drawFace(EMO_NEUTRAL, false);
