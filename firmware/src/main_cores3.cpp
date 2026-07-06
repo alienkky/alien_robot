@@ -95,6 +95,11 @@ int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
 bool g_ignoreTouchUntilRelease = false;
 bool g_queueImmediateTurn = false;
+// After a turn that failed to get an answer (too short/quiet, "잘 안 들렸어요 —
+// 다시 말해줘", server error), the next screen tap should jump straight into
+// listening — a plain tap, no press-and-hold. Set on every turn, cleared only
+// when a real answer comes back.
+bool g_tapToListenNext = false;
 uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
 
@@ -1239,6 +1244,10 @@ void handleTurn(bool holdMode) {
     return;
   }
 
+  // Assume this turn may not land an answer; if so, the next tap should go
+  // straight to listening. Cleared below once a real answer arrives.
+  g_tapToListenNext = true;
+
   faceSay(EMO_LISTEN, "듣는 중...");
   size_t samples = recordAudio(holdMode);
   if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
@@ -1320,6 +1329,7 @@ void handleTurn(bool holdMode) {
   // Pinpoint where voice breaks: "(none)" here = the server returned text but no
   // TTS audio_url (server/TTS side); a URL here but no sound = download/playback.
   Serial.printf("[turn] audio_url = %s\n", audioUrl[0] ? audioUrl : "(none)");
+  g_tapToListenNext = false;   // got a real answer — next touch is normal hold-to-talk
   // Happy face + speech bubble (only now, while talking) with the answer.
   faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
   if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
@@ -1385,7 +1395,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v37 (no phantom volume popup mid-turn)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v38 (tap-to-listen after unheard)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1520,6 +1530,13 @@ void loop() {
         waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
       // tap at the bottom without swiping up -> ignore (not a talk trigger)
+    } else if (g_tapToListenNext) {
+      // Right after a "잘 안 들렸어요 — 다시 말해줘" (or any failed turn), a plain
+      // TAP goes straight into listening (fixed window, no need to keep holding).
+      Serial.println("[turn] tap-to-listen (retry after unheard)");
+      handleTurn(/*holdMode=*/false);
+      runQueuedImmediateTurns();
+      waitForTouchReleaseBounded();
     } else {
       handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
       runQueuedImmediateTurns();
