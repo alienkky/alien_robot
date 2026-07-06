@@ -312,7 +312,11 @@ bool pollAnswerInterruptTouch() {
   feedWatchdog();
   auto d = M5.Touch.getDetail();
   if (d.wasPressed()) {
-    Serial.println("[touch] answer interrupted; queueing new turn");
+    // Tap while the robot is speaking: cut the current answer off RIGHT NOW and
+    // queue the next turn so the user can keep talking. Stopping the speaker here
+    // (not just when the call stack unwinds) makes the barge-in feel immediate.
+    Serial.println("[touch] answer interrupted; stopping speech, queueing new turn");
+    M5.Speaker.stop();
     g_queueImmediateTurn = true;
     return true;
   }
@@ -1395,7 +1399,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v38 (tap-to-listen after unheard)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v39 (tap barge-in stops speech)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
