@@ -1241,7 +1241,11 @@ bool fetchAndPlay(const String &audioUrl) {
   return interrupted;
 }
 
-void handleTurn(bool holdMode) {
+// allowCamera=false runs a pure audio-only turn (no camera init, no I2C
+// recovery). Used for retry turns after an unheard/too-quiet result: the camera
+// on the shared I2C bus is what corrupts the mic and jams touch, so retrying
+// WITHOUT it lets the mic settle on a clean bus and breaks the failure spiral.
+void handleTurn(bool holdMode, bool allowCamera = true) {
   if (!pcm) {  // PSRAM record buffer never allocated — cannot record
     Serial.println("[turn] no PSRAM buffer, abort");
     faceSay(EMO_SAD, "PSRAM 없음");
@@ -1274,7 +1278,9 @@ void handleTurn(bool holdMode) {
   // never leave it running at idle.
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
-  if (cameraOk && setupCamera()) {
+  bool usedCamera = false;   // gates the I2C recovery below — no camera, nothing to recover
+  if (cameraOk && allowCamera && setupCamera()) {
+    usedCamera = true;
     camera_fb_t *fb = captureFresh();
     if (fb) {
       showPhoto(fb);  // display the captured photo for ~1.5s
@@ -1287,9 +1293,13 @@ void handleTurn(bool holdMode) {
       Serial.println("[cam] fb_get failed, audio-only");
     }
     esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
-    // Recover the shared I2C bus so the next touch read cannot stall the loop
-    // (the permanent-freeze cause). See recoverSharedI2C().
+    // Recover the shared I2C bus ONCE, right after the camera touched it, so the
+    // next touch read cannot stall the loop (the permanent-freeze cause). The old
+    // extra recoveries in the error branches below were removed — they just churned
+    // the bus (repeated i2c_driver_delete errors) without adding safety.
     recoverSharedI2C();
+  } else if (cameraOk && !allowCamera) {
+    Serial.println("[turn] audio-only retry — camera skipped to keep the mic/bus clean");
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
@@ -1300,30 +1310,22 @@ void handleTurn(bool holdMode) {
   String resp = postSeeThinking(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
-    Serial.println("[turn] empty response; recovering I2C before idle");
-    if (cameraOk) recoverSharedI2C();
+    Serial.println("[turn] empty response");
+    // No I2C recovery here: if the camera ran this turn it was already recovered
+    // once above; if not (audio-only), there is nothing to recover.
     // Friendly, specific messages instead of a scary "server error".
     if (g_seeCode == 422) faceSay(EMO_NEUTRAL, "잘 안 들렸어요, 다시 말해줘");
     else if (g_seeCode == 400) faceSay(EMO_NEUTRAL, "너무 짧아요, 길게 말해줘");
     else if (g_seeCode == -11) faceSay(EMO_NEUTRAL, "서버가 느려요 — 다시 말해줘");
     else if (g_seeCode == -1 || g_seeCode == 0) faceSay(EMO_SAD, "서버 연결 안됨");
     else faceSay(EMO_SAD, "서버 문제 (다시 시도)");
-    if (cameraOk) {
-      Serial.println("[turn] final I2C recovery after error message");
-      recoverSharedI2C();
-    }
     return;
   }
 
   JsonDocument doc;
   if (deserializeJson(doc, resp)) {
     Serial.println("[turn] bad JSON response");
-    if (cameraOk) recoverSharedI2C();
     faceSay(EMO_SAD, "응답 오류");
-    if (cameraOk) {
-      Serial.println("[turn] final I2C recovery after JSON error message");
-      recoverSharedI2C();
-    }
     return;
   }
   const char *transcript = doc["transcript"] | "";
@@ -1339,7 +1341,7 @@ void handleTurn(bool holdMode) {
   if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
     waitAnswerInterruptWindow(800);
   }
-  if (cameraOk) recoverSharedI2C();
+  if (usedCamera) recoverSharedI2C();   // only if the camera touched the bus this turn
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
@@ -1399,7 +1401,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v39 (tap barge-in stops speech)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v40 (stabilize: audio-only retries, less I2C churn)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1537,8 +1539,11 @@ void loop() {
     } else if (g_tapToListenNext) {
       // Right after a "잘 안 들렸어요 — 다시 말해줘" (or any failed turn), a plain
       // TAP goes straight into listening (fixed window, no need to keep holding).
-      Serial.println("[turn] tap-to-listen (retry after unheard)");
-      handleTurn(/*holdMode=*/false);
+      // Retry is AUDIO-ONLY (allowCamera=false): the camera is what corrupts the
+      // mic and jams touch, so skipping it lets the retry actually succeed instead
+      // of spiralling through more 422s and stale-touch recoveries.
+      Serial.println("[turn] tap-to-listen (retry after unheard, audio-only)");
+      handleTurn(/*holdMode=*/false, /*allowCamera=*/false);
       runQueuedImmediateTurns();
       waitForTouchReleaseBounded();
     } else {
