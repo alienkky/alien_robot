@@ -737,10 +737,16 @@ void showWifiSettings() {
               M5.Display.setCursor(12, 18);
               M5.Display.setTextColor(TFT_CYAN);
               M5.Display.print("Connecting saved WiFi...");
-              WiFi.disconnect(false, false);
-              delay(200);
-              connectWifi();
-              delay(900);
+              // Bug: right after OK the new creds often would NOT associate, yet a
+              // reboot connected fine. Cause: the scan leaves the radio in a stale
+              // state and disconnect() with the radio still ON doesn't clear it, so
+              // the first begin() stalls. Power the radio fully OFF, then let
+              // connectWifi() bring STA up clean — exactly the fresh-boot path that
+              // always worked.
+              WiFi.disconnect(true, false);   // wifioff = true → clear stale scan/assoc
+              delay(400);
+              connectWifi();                  // re-inits WIFI_STA + begin() from clean
+              delay(300);
               return;
             }
             redraw();
@@ -1347,6 +1353,9 @@ void handleTurn(bool holdMode) {
   const char *answer = doc["answer"] | "";
   const char *audioUrl = doc["audio_url"] | "";
   Serial.printf("[turn] you: %s\n[turn] bot: %s\n", transcript, answer);
+  // Pinpoint where voice breaks: "(none)" here = the server returned text but no
+  // TTS audio_url (server/TTS side); a URL here but no sound = download/playback.
+  Serial.printf("[turn] audio_url = %s\n", audioUrl[0] ? audioUrl : "(none)");
   // Happy face + speech bubble (only now, while talking) with the answer.
   faceSay(EMO_HAPPY, answer[0] ? answer : "(대답)", /*showBubble=*/true);
   if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
@@ -1412,7 +1421,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v35 (volume during any screen)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v36 (wifi connect-after-OK fix)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
