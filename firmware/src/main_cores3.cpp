@@ -553,7 +553,28 @@ void showWifiSettings() {
   auto scan = [&]() {
     drawScanning();
     feedWatchdog();
-    networks = WiFi.scanNetworks(false, true);
+    // Why the scan "didn't work": boot's connectWifi() sets setAutoReconnect(true),
+    // so when the saved/target AP is missing the driver keeps hammering association
+    // in the background (the endless NO_AP_FOUND log). An in-progress association
+    // makes WiFi.scanNetworks() come back WIFI_SCAN_FAILED(-2) or 0 — an empty list.
+    // Fix: free the radio first (stop reconnect + drop the half-open association),
+    // force STA, then scan with a few retries since the first post-disconnect scan
+    // can still return busy.
+    WiFi.setAutoReconnect(false);
+    WiFi.disconnect(false, false);   // radio stays ON, saved AP kept
+    delay(150);
+    WiFi.mode(WIFI_STA);
+    networks = 0;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      WiFi.scanDelete();
+      feedWatchdog();
+      const int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
+      Serial.printf("[wifi] scan attempt %d -> %d\n", attempt + 1, n);
+      if (n > 0) { networks = n; break; }   // got APs
+      networks = 0;                          // n == 0 (empty) or n < 0 (failed)
+      delay(400);                            // let the radio settle, then retry
+    }
+    WiFi.setAutoReconnect(true);   // restore normal hold-connection behavior
     page = 0;
     Serial.printf("[wifi] scan found %d networks\n", networks);
   };
@@ -583,6 +604,18 @@ void showWifiSettings() {
       M5.Display.drawRoundRect(rowX, y, rowW, rowH, 6, TFT_WHITE);
       M5.Display.setCursor(rowX + 8, y + 8);
       M5.Display.printf("%c %.21s  %ld", locked ? '*' : ' ', ssid.c_str(), static_cast<long>(rssi));
+    }
+
+    // Empty result: say so in Korean so a 0-network scan reads as "scanned, none
+    // here" (turn on a 2.4GHz hotspot) rather than a frozen/blank panel.
+    if (networks <= 0) {
+      M5.Display.setFont(&fonts::efontKR_16);
+      M5.Display.setTextColor(TFT_YELLOW);
+      M5.Display.setCursor(rowX + 6, firstRowY + 8);
+      M5.Display.print("검색된 Wi-Fi 없음");
+      M5.Display.setCursor(rowX + 6, firstRowY + 30);
+      M5.Display.print("2.4GHz 핫스팟 켜고 RESCAN");
+      M5.Display.setFont(&fonts::Font0);
     }
 
     drawButton(8, 206, 64, 28, "BACK", TFT_RED, TFT_RED);
@@ -1296,7 +1329,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v32 (volume label font fix)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v33 (wifi scan hardening)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
