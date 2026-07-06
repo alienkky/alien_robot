@@ -99,6 +99,7 @@ uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
 
 void connectWifi();
+void showVolumeControl();   // defined later; used by the mid-turn volume gesture
 
 void feedWatchdog() {
   esp_task_wdt_reset();
@@ -300,6 +301,31 @@ void faceSay(Emotion e, const char *text, bool showBubble = false) {
   drawFace(e, true, -1);
 }
 
+// A press that started on the bottom strip (base_y > 200) and then slid UP far
+// enough is the "pull up the volume panel" gesture — the same one loop() uses at
+// idle. Blocks briefly until the finger releases or the swipe is confirmed.
+bool confirmBottomSwipeUp(int baseY) {
+  if (baseY <= 200) return false;         // didn't start at the bottom edge
+  while (true) {
+    M5.update();
+    feedWatchdog();
+    auto d = M5.Touch.getDetail();
+    if (!d.isPressed()) return false;     // released without sliding up → not a swipe
+    if (d.distanceY() < -50) return true; // slid up enough → volume gesture
+    delay(10);
+  }
+}
+
+// Volume must be reachable during ANY screen (recording / thinking / answer), not
+// only at idle. Halt any answer audio, open the volume panel (it grabs/releases
+// I2S itself), then restore whatever face was showing.
+void openVolumeFromTurn() {
+  Serial.println("[touch] volume gesture mid-turn; opening volume panel");
+  M5.Speaker.stop();          // stop answer playback if it is running
+  showVolumeControl();
+  drawFace(curEmo, true);     // repaint the face the turn was on
+}
+
 // Lip-sync the mouth AND stream the caption text out (auto-scrolling) while the
 // speaker plays. durationMs paces the reveal so the text finishes ~with the audio.
 bool pollAnswerInterruptTouch() {
@@ -307,6 +333,12 @@ bool pollAnswerInterruptTouch() {
   feedWatchdog();
   auto d = M5.Touch.getDetail();
   if (d.wasPressed()) {
+    // Bottom-edge swipe up = adjust volume, NOT a new turn. This makes volume
+    // reachable while an answer is playing/streaming.
+    if (d.base_y > 200 && confirmBottomSwipeUp(d.base_y)) {
+      openVolumeFromTurn();
+      return true;   // stop the current answer loop, but do NOT queue a new turn
+    }
     Serial.println("[touch] answer interrupted; queueing new turn");
     g_queueImmediateTurn = true;
     return true;
@@ -1163,6 +1195,16 @@ String postSeeThinking(const uint8_t *audio, size_t audioLen,
       shownSec = sec;
       snprintf(faceText, sizeof(faceText), "생각 중... %lus", static_cast<unsigned long>(sec));
     }
+    // Volume reachable even while thinking (vision can take ~1 min): a bottom→up
+    // swipe opens the panel; the background POST keeps running meanwhile.
+    M5.update();
+    {
+      auto d = M5.Touch.getDetail();
+      if (d.wasPressed() && d.base_y > 200 && confirmBottomSwipeUp(d.base_y)) {
+        openVolumeFromTurn();
+        continue;   // resume the thinking animation on the next iteration
+      }
+    }
     // Pupils sweep L → centre → R → centre every ~1.4s; quick blink every ~2.4s.
     const int step = (el / 350) % 4;
     const int pdx = (step == 0) ? -9 : (step == 2) ? 9 : 0;
@@ -1370,7 +1412,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v34 (bigger keyboard + visible password)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v35 (volume during any screen)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
