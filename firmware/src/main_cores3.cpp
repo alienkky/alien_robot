@@ -430,14 +430,23 @@ void saveWifiCredentials(const String &ssid, const String &pass) {
 }
 
 bool editWifiPassword(const String &ssid, String &pass) {
-  const int w = M5.Display.width();
-  const int keyW = 28, keyH = 26, gap = 3;
-  const int row1Y = 72, row2Y = 102, row3Y = 132;
-  const int bottomY = 188, bottomH = 40;
+  const int w = M5.Display.width();   // CoreS3 @ rotation 1 = 320 px wide
+  // Bigger keys than before (was 28x26): fill the 320px width and make the row
+  // taller so a fingertip actually lands on one key. 10 keys * 30 + 9 * 2 = 318.
+  const int keyW = 30, keyH = 34, gap = 2;
+  const int row1Y = 68, row2Y = 106, row3Y = 144;   // step 38 = keyH + 4
+  const int bottomY = 188, bottomH = 44;
   int mode = 0;  // 0 lower, 1 upper, 2 number/symbol
   const char *lowerRows[] = {"qwertyuiop", "asdfghjkl", "zxcvbnm"};
   const char *upperRows[] = {"QWERTYUIOP", "ASDFGHJKL", "ZXCVBNM"};
   const char *symRows[] = {"0123456789", "-_.@#$!?/", "%&*=+~"};
+
+  // Bottom action row — positions declared once so draw and hit-test never drift.
+  const int modeX = 2,   modeW = 52;
+  const int spaceX = 58, spaceW = 86;
+  const int delX = 148,  delW = 52;
+  const int okX = 204,   okW = 48;
+  const int cancelX = 256, cancelW = 62;
 
   auto rowText = [&]() -> const char ** {
     if (mode == 1) return upperRows;
@@ -445,47 +454,79 @@ bool editWifiPassword(const String &ssid, String &pass) {
     return lowerRows;
   };
 
-  auto masked = [&]() {
-    String s = "";
-    const int keep = pass.length() > 26 ? 26 : pass.length();
-    for (int i = 0; i < keep; i++) s += '*';
-    if (pass.length() > keep) s += "...";
-    return s;
+  // Center each keyboard row for the given key count — used by BOTH draw and hit
+  // test so a tapped pixel maps to the same key that was drawn there.
+  auto rowStartX = [&](const char *row) {
+    int n = 0;
+    while (row[n]) n++;
+    const int total = n * keyW + (n - 1) * gap;
+    return (w - total) / 2;
+  };
+
+  auto drawKey = [&](int x, int y, char c) {
+    M5.Display.drawRoundRect(x, y, keyW, keyH, 5, TFT_DARKGREY);
+    M5.Display.setFont(&fonts::Font0);
+    M5.Display.setTextSize(2);                 // 16px glyph — readable on a big key
+    M5.Display.setTextColor(TFT_WHITE);
+    char label[2] = {c, 0};
+    const int tw = M5.Display.textWidth(label);
+    M5.Display.setCursor(x + (keyW - tw) / 2, y + (keyH - 16) / 2);
+    M5.Display.print(label);
+    M5.Display.setTextSize(1);
   };
 
   auto redraw = [&]() {
     M5.Display.fillScreen(TFT_BLACK);
-    M5.Display.setFont(&fonts::Font0);
+    // Korean title needs the KR font.
+    M5.Display.setFont(&fonts::efontKR_16);
     M5.Display.setTextSize(1);
     M5.Display.setTextColor(TFT_CYAN);
-    M5.Display.setCursor(8, 8);
-    M5.Display.print("WiFi password");
+    M5.Display.setCursor(6, 3);
+    M5.Display.print("Wi-Fi 비밀번호 입력");
+    M5.Display.setFont(&fonts::Font0);
     M5.Display.setTextColor(TFT_WHITE);
-    M5.Display.setCursor(8, 26);
+    M5.Display.setCursor(6, 24);
     M5.Display.printf("SSID: %.28s", ssid.c_str());
-    M5.Display.setCursor(8, 44);
-    M5.Display.printf("PASS: %s", pass.length() ? masked().c_str() : "(open)");
+    // length counter (top-right) — proves a key registered even if text scrolls off
+    M5.Display.setTextColor(TFT_DARKGREY);
+    M5.Display.setCursor(w - 42, 24);
+    M5.Display.printf("[%d]", pass.length());
+    // PASSWORD IN PLAIN TEXT, size 2 (green) so the user can verify every tap.
+    // This is a private on-device screen; masking only hurt usability here.
+    M5.Display.setTextSize(2);
+    M5.Display.setTextColor(TFT_GREEN);
+    M5.Display.setCursor(6, 40);
+    if (pass.length() == 0) {
+      M5.Display.setTextColor(TFT_DARKGREY);
+      M5.Display.print("________");            // empty field marker
+    } else {
+      // ~26 chars fit at size2/320px; show the tail so the latest key is visible.
+      String shown = pass;
+      if (shown.length() > 24) shown = "..." + shown.substring(shown.length() - 21);
+      M5.Display.print(shown);
+    }
+    M5.Display.setTextSize(1);
 
     const char **rows = rowText();
-    const int starts[] = {6, 20, 48};
     const int ys[] = {row1Y, row2Y, row3Y};
     for (int r = 0; r < 3; r++) {
+      const int sx = rowStartX(rows[r]);
       for (int i = 0; rows[r][i]; i++) {
-        int x = starts[r] + i * (keyW + gap);
-        char label[2] = {rows[r][i], 0};
-        drawButton(x, ys[r], keyW, keyH, label, TFT_DARKGREY, TFT_WHITE);
+        drawKey(sx + i * (keyW + gap), ys[r], rows[r][i]);
       }
     }
 
-    drawButton(6, bottomY, 48, bottomH, mode == 0 ? "abc" : (mode == 1 ? "ABC" : "123"), TFT_CYAN, TFT_CYAN);
-    drawButton(60, bottomY, 70, bottomH, "SPACE", TFT_WHITE, TFT_WHITE);
-    drawButton(136, bottomY, 48, bottomH, "DEL", TFT_YELLOW, TFT_YELLOW);
-    drawButton(190, bottomY, 58, bottomH, "OK", TFT_GREEN, TFT_GREEN);
-    drawButton(254, bottomY, 60, bottomH, "CANCEL", TFT_RED, TFT_RED);
+    drawButton(modeX, bottomY, modeW, bottomH,
+               mode == 0 ? "abc" : (mode == 1 ? "ABC" : "123"), TFT_CYAN, TFT_CYAN);
+    drawButton(spaceX, bottomY, spaceW, bottomH, "SPACE", TFT_WHITE, TFT_WHITE);
+    drawButton(delX, bottomY, delW, bottomH, "DEL", TFT_YELLOW, TFT_YELLOW);
+    drawButton(okX, bottomY, okW, bottomH, "OK", TFT_GREEN, TFT_GREEN);
+    drawButton(cancelX, bottomY, cancelW, bottomH, "CANCEL", TFT_RED, TFT_RED);
   };
 
-  auto addKeyFromRow = [&](const char *row, int startX, int rowY, int x, int y) {
+  auto addKeyFromRow = [&](const char *row, int rowY, int x, int y) {
     if (y < rowY || y > rowY + keyH) return false;
+    const int startX = rowStartX(row);
     for (int i = 0; row[i]; i++) {
       int kx = startX + i * (keyW + gap);
       if (hitRect(x, y, kx, rowY, keyW, keyH)) {
@@ -505,24 +546,24 @@ bool editWifiPassword(const String &ssid, String &pass) {
     if (d.wasPressed()) {
       const int x = d.x, y = d.y;
       bool changed = false;
-      if (hitRect(x, y, 6, bottomY, 48, bottomH)) {
+      if (hitRect(x, y, modeX, bottomY, modeW, bottomH)) {
         mode = (mode + 1) % 3;
         changed = true;
-      } else if (hitRect(x, y, 60, bottomY, 70, bottomH)) {
+      } else if (hitRect(x, y, spaceX, bottomY, spaceW, bottomH)) {
         if (pass.length() < 63) pass += ' ';
         changed = true;
-      } else if (hitRect(x, y, 136, bottomY, 48, bottomH)) {
+      } else if (hitRect(x, y, delX, bottomY, delW, bottomH)) {
         if (pass.length() > 0) pass.remove(pass.length() - 1);
         changed = true;
-      } else if (hitRect(x, y, 190, bottomY, 58, bottomH)) {
+      } else if (hitRect(x, y, okX, bottomY, okW, bottomH)) {
         return true;
-      } else if (hitRect(x, y, 254, bottomY, 60, bottomH)) {
+      } else if (hitRect(x, y, cancelX, bottomY, cancelW, bottomH)) {
         return false;
       } else {
         const char **rows = rowText();
-        changed = addKeyFromRow(rows[0], 6, row1Y, x, y) ||
-                  addKeyFromRow(rows[1], 20, row2Y, x, y) ||
-                  addKeyFromRow(rows[2], 48, row3Y, x, y);
+        changed = addKeyFromRow(rows[0], row1Y, x, y) ||
+                  addKeyFromRow(rows[1], row2Y, x, y) ||
+                  addKeyFromRow(rows[2], row3Y, x, y);
       }
       if (changed) {
         redraw();
@@ -1329,7 +1370,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v33 (wifi scan hardening)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v34 (bigger keyboard + visible password)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
