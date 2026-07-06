@@ -682,16 +682,27 @@ void showVolumeControl() {
     M5.Display.drawRoundRect(barX, barY, barW, barH, 6, TFT_WHITE);
     const int fillw = g_speakerVolume * (barW - 4) / 255;
     if (fillw > 0) M5.Display.fillRoundRect(barX + 2, barY + 2, fillw, barH - 4, 5, TFT_CYAN);
-    // − / 완료 / + buttons
+    // 작게 / 완료 / 크게 buttons.
+    // drawButton(WiFi) above switched the active font to Font0 and did NOT restore
+    // it, so we MUST re-select the Korean font here — otherwise "완료" renders as
+    // garbage boxes and the volume +/- glyphs come out tiny/off-center (their
+    // cursor offsets were sized for the 16px KR font, not 8px Font0). This was the
+    // "음량조절 글씨가 이상하게 나온다" bug. Labels are centered with textWidth so
+    // they stay put regardless of glyph width.
+    M5.Display.setFont(&fonts::efontKR_16);
+    M5.Display.setTextSize(1);
+    M5.Display.setTextColor(TFT_WHITE);
+    auto centeredLabel = [&](int bx, int bw, const char *label) {
+      const int tw = M5.Display.textWidth(label);
+      M5.Display.setCursor(bx + (bw - tw) / 2, btnY + btnH / 2 - 8);
+      M5.Display.print(label);
+    };
     M5.Display.drawRoundRect(minusX, btnY, btnW, btnH, 8, TFT_WHITE);
-    M5.Display.setCursor(minusX + btnW / 2 - 5, btnY + btnH / 2 - 8);
-    M5.Display.print("-");
+    centeredLabel(minusX, btnW, "작게");                 // − : quieter
     M5.Display.drawRoundRect(plusX, btnY, btnW, btnH, 8, TFT_WHITE);
-    M5.Display.setCursor(plusX + btnW / 2 - 5, btnY + btnH / 2 - 8);
-    M5.Display.print("+");
+    centeredLabel(plusX, btnW, "크게");                  // + : louder
     M5.Display.drawRoundRect(doneX, btnY, btnW, btnH, 8, TFT_GREEN);
-    M5.Display.setCursor(doneX + btnW / 2 - 16, btnY + btnH / 2 - 8);
-    M5.Display.print("완료");
+    centeredLabel(doneX, btnW, "완료");
     M5.Display.setFont(&fonts::Font0);
   };
   redraw();
@@ -1285,7 +1296,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v31 (wifi setup panel)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v32 (volume label font fix)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
