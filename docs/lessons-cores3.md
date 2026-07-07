@@ -1,7 +1,11 @@
 ---
 tags: [alien-robot, cores3, firmware, lessons, i2c, mic, camera]
-updated: 2026-07-03
+updated: 2026-07-07
 ---
+
+> **현재 상태(2026-07-07, fw v48):** 아래 0~4번은 "카메라 OFF가 기준선"이던 시절 기록이다.
+> v43부터 전략이 바뀌었다 — **카메라 ON을 유지**하고, 카메라가 공유 I2C를 건드린 직후
+> **터치·마이크·스피커 컨트롤러를 매 턴 강제 리셋**한다. 최신 상태·검증 결과는 **6번 섹션** 참고.
 
 # CoreS3 펌웨어 — 반복하면 안 되는 실수 (lessons learned)
 
@@ -97,3 +101,55 @@ CoreS3는 **내부 I2C 버스(port 1) 하나**를 다음이 공유한다:
 - 원인 후보: 너무 작은 녹음도 카메라/서버 경로를 탔고, 카메라 I2C 복구 뒤 post-turn `while (touchPressed())`가 stale pressed 상태를 영원히 release 대기. 이 루프는 watchdog을 feed하므로 리셋도 안 되어 영구 먹통처럼 보일 수 있음.
 - 규칙: pre-gain mic peak가 로컬 기준보다 낮으면 카메라와 `/api/see`를 호출하지 말고 로컬에서 "소리가 작아요"로 끝낸다.
 - 규칙: 카메라/서버 turn 뒤 터치 release 대기는 반드시 bounded wait로 한다. timeout이면 stale pressed 상태를 무시하고, release가 관측될 때까지 주기적으로 I2C recovery를 재시도한다.
+
+---
+
+## 6. v40~v48 — 카메라 ON 유지 + 공유버스 코덱 매 턴 리셋 (현재 진행)
+
+전략 전환: "카메라 OFF"라는 회피 대신, **카메라를 켠 채로** 공유 I2C에 물린 각 컨트롤러를
+카메라 사용 직후 **강제로 되살린다.** 브랜치 `agent/embedded-engineer/9aa2a597`(PR #2).
+
+### 핵심 깨달음
+`recoverSharedI2C()`(비트뱅 버스 클럭아웃)는 **전선만** 되살린다. 버스에 물린 **컨트롤러들의
+내부 상태(레지스터)** 는 원복하지 않는다 → 카메라 후 각 칩이 망가진 채로 돌아온다:
+- **FT6336 터치** → stuck-"pressed"(가짜 눌림): 볼륨 패널 자동 열림 + 터치 먹통
+- **ES7210 마이크** → 무음(`peak≈1`): "소리가 작아요" 무한 루프
+- **AW88298 스피커** → 무음: `audio_url` 정상인데 답변 음성 안 남
+
+→ **해결: 버스 복구 후 각 컨트롤러를 재초기화한다.** 그리고 **버스 복구가 일어나는 모든
+지점(캡처 직후 + 답변 직후)에서** 재초기화해야 한다 — 안 그러면 뒤의 복구가 방금 살린 코덱을
+다시 죽인다(v46에서 발견한 재훼손 버그).
+
+### 버전별 변경
+| 버전 | 내용 |
+|---|---|
+| v40 | 실패 후 재시도는 audio-only(카메라 스킵) + I2C 복구를 턴당 1회로 축소 |
+| v41 | 스와이프 인식 강화(`confirmSwipe`, 70px·연속·700ms 상한) → 가짜 터치 볼륨 자동열림 차단 |
+| v42 | `/api/see` read timeout 120s→30s (Kimi 정상 ~3s라 30s면 stuck 판정) |
+| v43 | **FT6336 터치 컨트롤러 리셋**(`settleTouchAfterCamera`): 디바이스모드 레지스터 재기입 + not-pressed 안정화 폴링. **실기 확인 `[touch] controller settled clean after camera` ✅** |
+| v44 | tap-to-listen 시간제한(15s) + `confirmRealPress`(~60ms 지속) → 가짜 터치 자동 듣기 루프 차단 |
+| v45 | ES7210 **마이크 코덱 재초기화** |
+| v46 | **마이크+스피커 둘 다 재초기화**(`settleAudioAfterCamera`) + `recoverAfterCamera()`(복구+터치+오디오)를 캡처·답변 후 양쪽 적용 → 재훼손 버그 제거 |
+| v47 | 무해한 `i2c/gdma/I2S` ESP-IDF 에러 로그 음소거(`esp_log_level_set NONE`) — 성공 로그가 고장처럼 보이던 문제 |
+| v48 | 풀다운 상태바에 fw 버전 표시(`kFwVersion`) + 음성 경로 전구간 로그(`[audio] GET code/len/vol`, `playWav samples/rate/vol`) |
+
+### 실기 확인됨 (사용자 로그)
+- 터치: `[touch] controller settled clean after camera` ✅
+- 마이크(카메라 턴): `[mic] peak=6573` ✅
+- 서버: `/api/see -> 200 (~6s)` ✅ (인프라가 STT를 threadpool로 빼 50초 wedge 해소)
+- 비전: 한국어 이미지 묘사 정답 ✅
+- 서버 TTS: `audio_url = /audio/….wav` 생성 ✅
+- 보안: X-Device-Token 인증(공개 URL 토큰 없으면 401) ✅
+
+### 미검증 (실기 로그 대기)
+- 스피커 음성이 실제로 들리는지(v46 스피커 재초기화 효과) — v48 `[audio]`/`playWav` 로그로 서버 vs 스피커 판별.
+- **카메라 턴 다음** 녹음의 `[mic] peak`이 계속 높은지(v46 재훼손 제거 효과).
+
+### 다음 카드 (그래도 안 되면)
+- ES7210/AW88298 **레지스터 직접 리셋**(M5.Mic/Speaker begin으로 부족할 때).
+- 최후: 카메라 OFF(오디오 전용) — 즉시 완전 안정, 비전 포기. `CAM_ENABLE 0`.
+
+### 서버측(인프라 영역, 참고)
+- STT를 `run_in_threadpool`로 분리 → 게이트웨이 50초 wedge 해소, 턴 ~7~8s.
+- `/api/see`·`/api/turn`·`/audio` 등에 `X-Device-Token` 인증 강제, Funnel 유지.
+- `/api/see` 비전 게이트: transcript가 "뭐가 보여" 류일 때만 이미지 전달.
