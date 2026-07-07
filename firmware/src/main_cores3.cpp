@@ -93,7 +93,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v56";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v57";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -183,7 +183,7 @@ enum Emotion { EMO_NEUTRAL, EMO_LISTEN, EMO_THINK, EMO_HAPPY, EMO_SAD };
 
 M5Canvas *face = nullptr;
 Emotion curEmo = EMO_NEUTRAL;
-char faceText[256] = "";   // holds the (possibly long) Korean answer
+char faceText[1024] = "";   // holds the (possibly long) Korean answer — v57: 4x for longer replies
 bool bubbleOn = false;     // speech bubble only shows while talking
 int g_seeCode = 0;         // last /api/see HTTP status (for friendly messages)
 
@@ -298,12 +298,28 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
     drawBubbleLines(c, faceText, revealGlyphs, bx + 8, by + 6, bw - 16, 20, (bh - 10) / 20);
     c.setFont(&fonts::Font0);
   } else if (faceText[0]) {
-    // Not talking: just a compact status line at the bottom (no big box).
+    // Not talking: compact status line — moved up so it clears the button bar.
     c.setFont(&fonts::efontKR_16);
     c.setTextSize(1);
     c.setTextColor(TFT_CYAN);
-    c.setCursor(8, h - 22);
+    c.setCursor(8, h - 52);
     c.print(faceText);
+    c.setFont(&fonts::Font0);
+  }
+  // v57: bottom button bar — [대화] = audio-only chat turn, [캡처] = photo turn
+  // (the only turn that shows the captured photo full-screen). Hidden while the
+  // speech bubble covers the bottom band.
+  if (!bubbleOn) {
+    const int bbh = 26, bby = h - bbh - 4;
+    c.setFont(&fonts::efontKR_16);
+    c.setTextSize(1);
+    c.drawRoundRect(6, bby, 92, bbh, 6, col);
+    c.setTextColor(col);
+    c.setCursor(6 + 30, bby + 5);
+    c.print("대화");
+    c.drawRoundRect(w - 98, bby, 92, bbh, 6, col);
+    c.setCursor(w - 98 + 30, bby + 5);
+    c.print("캡처");
     c.setFont(&fonts::Font0);
   }
   c.pushSprite(0, 0);
@@ -1206,6 +1222,26 @@ bool confirmSwipe(bool dirUp) {
   return false;                         // timed out → treat as no swipe (never hangs)
 }
 
+// v57: classify a bottom-strip touch. A deliberate upward swipe opens the
+// volume panel; a sustained tap (~40ms+ of contact) is a button press; a
+// 1-frame flicker is a phantom and is ignored.
+enum BottomTouch { BT_NONE, BT_TAP, BT_SWIPE_UP };
+BottomTouch classifyBottomTouch() {
+  const uint32_t start = millis();
+  int held = 0, swipeHits = 0;
+  while (millis() - start < 700) {
+    M5.update();
+    feedWatchdog();
+    auto d = M5.Touch.getDetail();
+    if (!d.isPressed()) break;         // finger lifted — decide on what we saw
+    held++;
+    swipeHits = (d.distanceY() < -70) ? swipeHits + 1 : 0;
+    if (swipeHits >= 3) return BT_SWIPE_UP;   // sustained upward motion
+    delay(10);
+  }
+  return (held >= 4) ? BT_TAP : BT_NONE;      // ≥~40ms contact = a real finger
+}
+
 // Require the touch to STAY pressed for a short moment — a deliberate finger, not
 // a phantom glitch that flickers "pressed" for a frame after the camera churns the
 // I2C bus. Used to gate the tap-to-listen retry so phantom edges can't auto-launch
@@ -1533,7 +1569,8 @@ bool fetchAndPlay(const String &audioUrl) {
 // recovery). Used for retry turns after an unheard/too-quiet result: the camera
 // on the shared I2C bus is what corrupts the mic and jams touch, so retrying
 // WITHOUT it lets the mic settle on a clean bus and breaks the failure spiral.
-void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false) {
+void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false,
+                bool showShot = false) {
   if (!pcm) {  // PSRAM record buffer never allocated — cannot record
     Serial.println("[turn] no PSRAM buffer, abort");
     faceSay(EMO_SAD, "PSRAM 없음");
@@ -1587,7 +1624,9 @@ void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false)
       }
       camera_fb_t *fb = captureFresh();
       if (fb) {
-        showPhoto(fb);  // display the captured photo for ~1.5s
+        // v57: the full-screen photo flash read as "the screen turned off and
+        // back on" (dark shots especially). Only the [캡처] button shows it.
+        if (showShot) showPhoto(fb);
         if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
         Serial.printf("[cam] captured %ux%u -> jpeg %u bytes\n",
                       static_cast<unsigned>(fb->width), static_cast<unsigned>(fb->height),
@@ -1868,13 +1907,30 @@ void loop() {
       }
       // released/jittered at the top without a real swipe -> ignore
     } else if (td.base_y > 200) {
-      // Bottom strip: a deliberate UPWARD swipe pulls up the volume panel. The
-      // hardened confirmSwipe() stops the phantom-touch auto-open seen in the log.
-      if (confirmSwipe(/*dirUp=*/true)) {
-        showVolumeControl();
-        waitForTouchReleaseBounded();  // consume the rest of the gesture
+      // Bottom strip (v57): [대화] button left, [캡처] button right, and a
+      // deliberate UPWARD swipe still pulls up the volume panel.
+      const int touchX = td.base_x;
+      switch (classifyBottomTouch()) {
+        case BT_SWIPE_UP:
+          showVolumeControl();
+          waitForTouchReleaseBounded();  // consume the rest of the gesture
+          break;
+        case BT_TAP:
+          g_followUpChain = 0;           // buttons start a fresh conversation chain
+          if (touchX < 160) {
+            Serial.println("[turn] button: 대화 (audio-only chat)");
+            handleTurn(/*holdMode=*/false, /*allowCamera=*/false);
+          } else {
+            Serial.println("[turn] button: 캡처 (photo turn, shows the shot)");
+            handleTurn(/*holdMode=*/false, /*allowCamera=*/true,
+                       /*isFollowUp=*/false, /*showShot=*/true);
+          }
+          runQueuedImmediateTurns();
+          waitForTouchReleaseBounded();
+          break;
+        default:
+          break;  // phantom flicker — ignore
       }
-      // tap/jitter at the bottom without a real swipe -> ignore (not a talk trigger)
     } else {
       // Centre press = talk. Tap-to-listen (a plain tap that jumps straight into
       // an audio-only listen) only applies RIGHT AFTER a failed turn AND for a

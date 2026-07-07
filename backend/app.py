@@ -316,8 +316,13 @@ async def ask_brain180(transcript: str, image_b64: str | None = None) -> str:
             detail="BRAIN180_DEVICE_TOKEN not configured (set it to the server's ROBOT_DEVICE_TOKEN)",
         )
 
+    # Optional reply-style hint appended to the message (the robot persona lives
+    # server-side in Brain180 and pins replies to 1-2 sentences; this lets the
+    # gateway ask for longer/more detailed answers without a Brain180 deploy).
+    hint = env("BRAIN180_STYLE_HINT")
+    message = f"{transcript}\n\n[스타일: {hint}]" if hint else transcript
     payload: dict[str, Any] = {
-        "message": transcript,
+        "message": message,
         "history": list(_robot_history),
     }
     if image_b64:
