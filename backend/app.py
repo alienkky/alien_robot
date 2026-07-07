@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import os
 import subprocess
 import tempfile
+import time
 import wave
 from collections import deque
 from pathlib import Path
@@ -14,11 +16,24 @@ import httpx
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from scipy import signal
 from scipy.io import wavfile
 
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("robot-gateway")
+
+
+def _ms(start: float) -> int:
+    """Elapsed milliseconds since `start` (a time.perf_counter() value)."""
+    return int((time.perf_counter() - start) * 1000)
 
 APP_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = APP_DIR / "artifacts"
@@ -121,34 +136,67 @@ async def ask_ollama(transcript: str) -> str:
     return answer
 
 
-async def ask_openai_compatible(transcript: str) -> str:
+async def ask_openai_compatible(transcript: str, image_b64: str | None = None) -> str:
+    """Local 4090 vLLM (Qwen3.6 multimodal) — text + optional camera image.
+
+    This is the fast, private, zero-cost vision path. The image is sent as an
+    OpenAI-style base64 data URL, which vLLM's multimodal endpoint accepts.
+    Qwen3 "thinking" is disabled so short robot replies don't burn max_tokens
+    on hidden reasoning (verified: empty answers otherwise).
+    """
+    system_prompt = env("SYSTEM_PROMPT") or (
+        "You are a concise Korean voice assistant for a small desk robot. "
+        "Answer naturally in Korean in one or two short sentences unless detail is requested."
+    )
+    user_text = transcript.strip()
+    if image_b64:
+        user_content: str | list[dict[str, Any]] = [
+            {"type": "text", "text": user_text},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+            },
+        ]
+    else:
+        user_content = user_text
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(list(_robot_history))
+    messages.append({"role": "user", "content": user_content})
+
     payload = {
         "model": env("VLLM_MODEL", "qwen36"),
-        "messages": [
-            {"role": "system", "content": env("SYSTEM_PROMPT")},
-            {"role": "user", "content": transcript},
-        ],
+        "messages": messages,
         "temperature": float(env("LLM_TEMPERATURE", "0.7")),
         "max_tokens": int(env("LLM_MAX_TOKENS", "256")),
+        # Qwen3 reasoning parser: keep replies terse, don't spend budget thinking.
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     base_url = env("VLLM_BASE_URL", "http://127.0.0.1:8000/v1").rstrip("/")
     headers = {"Authorization": f"Bearer {env('VLLM_API_KEY', 'EMPTY')}"}
+    timeout = float(env("VLLM_TIMEOUT", "120"))
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions",
                 json=payload,
                 headers=headers,
             )
             response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300] if exc.response is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"vLLM request failed: {detail}") from exc
     except httpx.HTTPError as exc:
-        raise HTTPException(status_code=502, detail=f"vLLM request failed: {exc}") from exc
+        raise HTTPException(status_code=502, detail=f"vLLM unreachable: {exc}") from exc
 
     data = response.json()
     choices = data.get("choices", [])
     answer = choices[0].get("message", {}).get("content", "").strip() if choices else ""
     if not answer:
         raise HTTPException(status_code=502, detail="vLLM returned an empty answer")
+
+    _robot_history.append({"role": "user", "content": transcript})
+    _robot_history.append({"role": "assistant", "content": answer})
     return answer
 
 
@@ -287,7 +335,7 @@ async def ask_llm(transcript: str, image_b64: str | None = None) -> str:
     if provider == "ollama":
         return await ask_ollama(transcript)
     if provider == "vllm":
-        return await ask_openai_compatible(transcript)
+        return await ask_openai_compatible(transcript, image_b64)
     raise HTTPException(status_code=500, detail=f"Unsupported LLM_PROVIDER: {provider}")
 
 
@@ -352,10 +400,22 @@ async def turn(request: Request) -> dict[str, str | None]:
     if len(pcm) % SAMPLE_WIDTH_BYTES != 0:
         raise HTTPException(status_code=400, detail="PCM body must be 16-bit aligned")
 
-    transcript = transcribe_pcm(pcm)
+    t0 = time.perf_counter()
+    # STT and Piper TTS are blocking (CPU / subprocess). Run them in the
+    # threadpool so they never wedge the async event loop (was ~50s stalls).
+    transcript = await run_in_threadpool(transcribe_pcm, pcm)
+    t_stt = _ms(t0)
+    t1 = time.perf_counter()
     answer = await ask_llm(transcript)
+    t_llm = _ms(t1)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
-    audio_url = synthesize_with_piper(answer, key)
+    t2 = time.perf_counter()
+    audio_url = await run_in_threadpool(synthesize_with_piper, answer, key)
+    t_tts = _ms(t2)
+    log.info(
+        "[turn] provider=%s stt=%dms llm=%dms tts=%dms total=%dms",
+        env("LLM_PROVIDER", "ollama").lower(), t_stt, t_llm, t_tts, _ms(t0),
+    )
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
 
 
@@ -371,15 +431,19 @@ async def see(
     can attach what the camera sees. Use LLM_PROVIDER=brain180 for the Brain180
     bridge, or LLM_PROVIDER=openai for the fast cloud fallback.
     """
+    t0 = time.perf_counter()
     if text and text.strip():
         transcript = text.strip()
+        t_stt = 0
     else:
         pcm = await audio.read()
         if len(pcm) < SAMPLE_RATE * SAMPLE_WIDTH_BYTES // 2:
             raise HTTPException(status_code=400, detail="PCM body is too short")
         if len(pcm) % SAMPLE_WIDTH_BYTES != 0:
             raise HTTPException(status_code=400, detail="PCM body must be 16-bit aligned")
-        transcript = transcribe_pcm(pcm)
+        # Blocking STT off the event loop (see /api/turn note).
+        transcript = await run_in_threadpool(transcribe_pcm, pcm)
+        t_stt = _ms(t0)
 
     image_b64: str | None = None
     if image is not None:
@@ -387,9 +451,18 @@ async def see(
         if raw:
             image_b64 = base64.b64encode(raw).decode("ascii")
 
+    t1 = time.perf_counter()
     answer = await ask_llm(transcript, image_b64)
+    t_llm = _ms(t1)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
-    audio_url = synthesize_with_piper(answer, key)
+    t2 = time.perf_counter()
+    audio_url = await run_in_threadpool(synthesize_with_piper, answer, key)
+    t_tts = _ms(t2)
+    log.info(
+        "[see] provider=%s image=%s stt=%dms llm=%dms tts=%dms total=%dms",
+        env("LLM_PROVIDER", "ollama").lower(), image_b64 is not None,
+        t_stt, t_llm, t_tts, _ms(t0),
+    )
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
 
 
