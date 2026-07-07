@@ -93,7 +93,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v53";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v54";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -943,9 +943,12 @@ void recoverSharedI2C() {
   // touching the hardware — so the bus stays dead and every codec NO-ACKs
   // (field logs: es7210 NO-ACK x3, next-turn mic peak=1). v52 cleared only
   // the HAL flag, which made begin() a no-op on a DEINITED bus — worse.
-  // Wire1.end() is the one call that clears the TwoWire flag AND deinits the
+  // Wire.end() is the one call that clears the TwoWire flag AND deinits the
   // HAL together, so the begin() below performs a true re-init ("i2cInit()"
-  // reappears in the log).
+  // reappears in the log). v53 ended only Wire1 and the warning persisted —
+  // M5 may route In_I2C through either TwoWire instance, so end BOTH
+  // (end() on a never-begun instance is harmless).
+  Wire.end();
   Wire1.end();
   i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));  // harmless if gone
   if (i2cIsInit(CAM_SCCB_I2C_PORT)) i2cDeinit(CAM_SCCB_I2C_PORT);  // belt & braces
@@ -1012,6 +1015,42 @@ void settleTouchAfterCamera() {
 // the server returned an audio_url. begin() alone can no-op, so force a full
 // reconfigure of each by calling begin() (which rewrites the codec registers) on
 // the recovered bus, then leave them ended for recordAudio()/playWav() to reopen.
+// ── AW9523 GPIO expander (0x58) snapshot/restore ─────────────────────
+// On CoreS3 the AW9523 drives the PHYSICAL power/enable lines: speaker amp
+// enable, camera reset, 5V boost, bus power. Camera-driven I2C churn can
+// clobber its output latches — after that, M5.Speaker.begin() rewrites the
+// AW88298 codec registers all it wants, but the amp is physically unpowered
+// and stays silent (field: boot probe aw88298=ACK + boot beep audible, yet
+// every post-camera probe NO-ACK and TTS silent). We don't need to know the
+// bit meanings: snapshot the known-good register state right after M5.begin()
+// and restore it verbatim after every camera-driven recovery.
+constexpr uint8_t kAw9523Addr = 0x58;
+constexpr uint8_t kAw9523Regs[] = {0x02, 0x03, 0x04, 0x05, 0x11, 0x12, 0x13};
+uint8_t g_aw9523Snapshot[sizeof(kAw9523Regs)];
+bool g_aw9523Saved = false;
+
+void snapshotAw9523() {
+  for (size_t i = 0; i < sizeof(kAw9523Regs); i++) {
+    if (!M5.In_I2C.readRegister(kAw9523Addr, kAw9523Regs[i], &g_aw9523Snapshot[i], 1, 100000)) {
+      Serial.println("[audio] AW9523 snapshot FAILED — expander not ACKing at boot");
+      return;
+    }
+  }
+  g_aw9523Saved = true;
+  Serial.printf("[audio] AW9523 snapshot: out0=%02X out1=%02X dir0=%02X dir1=%02X\n",
+                g_aw9523Snapshot[0], g_aw9523Snapshot[1],
+                g_aw9523Snapshot[2], g_aw9523Snapshot[3]);
+}
+
+void restoreAw9523() {
+  if (!g_aw9523Saved) return;
+  bool ok = true;
+  for (size_t i = 0; i < sizeof(kAw9523Regs); i++) {
+    ok &= M5.In_I2C.writeRegister(kAw9523Addr, kAw9523Regs[i], &g_aw9523Snapshot[i], 1, 100000);
+  }
+  Serial.printf("[audio] AW9523 restored (%s)\n", ok ? "ok" : "WRITE FAILED");
+}
+
 void settleAudioAfterCamera() {
   M5.Speaker.end();
   M5.Mic.end();
@@ -1024,12 +1063,17 @@ void settleAudioAfterCamera() {
   for (int attempt = 0; attempt < 3; attempt++) {
     const bool micAck = M5.In_I2C.scanID(kEs7210Addr);
     const bool spkAck = M5.In_I2C.scanID(kAw88298Addr);
-    Serial.printf("[audio] probe %d: es7210(mic)=%s aw88298(spk)=%s\n", attempt + 1,
-                  micAck ? "ACK" : "NO-ACK", spkAck ? "ACK" : "NO-ACK");
+    const bool expAck = M5.In_I2C.scanID(kAw9523Addr);
+    Serial.printf("[audio] probe %d: es7210(mic)=%s aw88298(spk)=%s aw9523(exp)=%s\n", attempt + 1,
+                  micAck ? "ACK" : "NO-ACK", spkAck ? "ACK" : "NO-ACK", expAck ? "ACK" : "NO-ACK");
     if (micAck && spkAck) break;
     recoverSharedI2C();   // chip(s) off the bus — clock it free and probe again
     delay(20);
   }
+  // Re-assert the expander's power/enable lines the camera churn may have
+  // clobbered — WITHOUT this, the codec re-inits below write into an
+  // unpowered amp and the answer voice stays silent.
+  restoreAw9523();
   const bool micOk = M5.Mic.begin();
   M5.Mic.end();
   const bool spkOk = M5.Speaker.begin();
@@ -1242,6 +1286,7 @@ bool playWav(const uint8_t *wav, size_t len) {
   bool spkAck = M5.In_I2C.scanID(0x36);
   if (!spkAck) {
     recoverSharedI2C();
+    restoreAw9523();    // re-power the amp if the expander lines were clobbered
     spkAck = M5.In_I2C.scanID(0x36);
   }
   Serial.printf("[audio] pre-play amp probe: aw88298=%s\n", spkAck ? "ACK" : "NO-ACK (expect silence)");
@@ -1671,6 +1716,7 @@ void setup() {
     const bool spkAck = M5.In_I2C.scanID(0x36);   // AW88298 speaker amp
     Serial.printf("[audio] BOOT probe: es7210(mic)=%s aw88298(spk)=%s\n",
                   micAck ? "ACK" : "NO-ACK", spkAck ? "ACK" : "NO-ACK");
+    snapshotAw9523();   // save the expander's known-good power/enable state
     M5.Speaker.begin();
     M5.Speaker.setVolume(g_speakerVolume);
     M5.Speaker.tone(880, 150);                    // boot beep — audible = amp alive
