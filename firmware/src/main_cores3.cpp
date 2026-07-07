@@ -93,7 +93,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v55";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v56";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -105,6 +105,13 @@ bool g_queueImmediateTurn = false;
 // when a real answer comes back. Time-boxed (see kTapToListenWindowMs): a stale
 // flag must NOT let a phantom touch auto-launch listening minutes later.
 bool g_tapToListenNext = false;
+// v56 continuous conversation: after a successful answer the robot listens
+// again by itself — say nothing for one 4s window and it quietly goes idle.
+// The chain cap stops ambient noise from making it talk to itself forever.
+bool g_followUpNext = false;
+uint8_t g_followUpChain = 0;
+constexpr uint8_t kFollowUpChainMax = 8;
+constexpr uint32_t kFollowUpDelayMs = 350;   // small gap after playback before re-listening
 uint32_t g_tapToListenArmedMs = 0;   // when tap-to-listen was armed
 uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
@@ -1526,7 +1533,7 @@ bool fetchAndPlay(const String &audioUrl) {
 // recovery). Used for retry turns after an unheard/too-quiet result: the camera
 // on the shared I2C bus is what corrupts the mic and jams touch, so retrying
 // WITHOUT it lets the mic settle on a clean bus and breaks the failure spiral.
-void handleTurn(bool holdMode, bool allowCamera = true) {
+void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false) {
   if (!pcm) {  // PSRAM record buffer never allocated — cannot record
     Serial.println("[turn] no PSRAM buffer, abort");
     faceSay(EMO_SAD, "PSRAM 없음");
@@ -1544,6 +1551,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   size_t samples = recordAudio(holdMode);
   if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
     Serial.println("[turn] too short, skip");
+    if (isFollowUp) { faceSay(EMO_NEUTRAL, ""); return; }  // silence ends the conversation, no nag
     faceSay(EMO_NEUTRAL, "너무 짧아요 — 길게 말해줘");
     return;
   }
@@ -1551,6 +1559,11 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   if (micPeak < kMinSpeechPeakForServer) {
     Serial.printf("[turn] speech too quiet (peak=%d < %d), skip camera/server\n",
                   static_cast<int>(micPeak), static_cast<int>(kMinSpeechPeakForServer));
+    if (isFollowUp) {
+      Serial.println("[turn] follow-up silent — conversation over, back to idle");
+      faceSay(EMO_NEUTRAL, "");
+      return;
+    }
     faceSay(EMO_NEUTRAL, "소리가 작아요 — 다시 말해줘");
     return;
   }
@@ -1639,6 +1652,12 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   // after its one-time init, so there is nothing to recover — and recovering here
   // was itself re-corrupting the codecs (the v46 finding).
   resumeCameraAfterTurn();   // playback done — frames may flow again
+  // v56: answered successfully → listen for a follow-up without a new touch.
+  if (g_followUpChain < kFollowUpChainMax) {
+    g_followUpNext = true;
+  } else {
+    Serial.println("[turn] follow-up chain cap reached — touch to continue");
+  }
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
@@ -1827,6 +1846,19 @@ void loop() {
     delay(10);
     return;
   }
+  // v56 continuous conversation: an answered turn arms one automatic follow-up
+  // listen. Speech chains into the next turn (context flows via the gateway's
+  // rolling history); silence quietly returns to idle.
+  if (g_followUpNext) {
+    g_followUpNext = false;
+    g_followUpChain++;
+    delay(kFollowUpDelayMs);
+    Serial.printf("[turn] follow-up listen %u/%u (continuous conversation)\n",
+                  g_followUpChain, kFollowUpChainMax);
+    handleTurn(/*holdMode=*/false, /*allowCamera=*/true, /*isFollowUp=*/true);
+    runQueuedImmediateTurns();
+    return;
+  }
   if (!g_ignoreTouchUntilRelease && td.wasPressed()) {
     if (td.base_y < 40) {
       // Top strip: a deliberate downward swipe pulls down the battery status.
@@ -1849,6 +1881,7 @@ void loop() {
       // deliberate, sustained press. Both guards exist to kill the "자동으로 듣는
       // 중 반복" loop: a stale flag + a phantom touch was auto-launching listen
       // turns over and over. Otherwise fall back to normal hold-to-talk.
+      g_followUpChain = 0;   // a deliberate touch starts a fresh conversation chain
       const bool retryWindow = g_tapToListenNext &&
                                (millis() - g_tapToListenArmedMs < kTapToListenWindowMs);
       if (retryWindow && confirmRealPress()) {
