@@ -92,7 +92,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v50";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v51";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -1054,6 +1054,25 @@ camera_fb_t *captureFresh() {
   return esp_camera_fb_get();
 }
 
+// v51: quiet the camera before the network phase. The prebuilt esp32-camera
+// driver's cam_task has a small FIXED stack we cannot grow from Arduino, and
+// with the v50 keep-alive camera it kept pumping DVP frames concurrently with
+// the HTTPS/TLS handshake of the gateway POST. That combination overflows the
+// cam_task stack — field crash "Stack canary watchpoint triggered (cam_task)"
+// → PANIC reboot right at "생각 중" (first seen the moment the Funnel https
+// URL went live; plain-http turns never triggered it). So: tear the camera
+// down after the JPEG is encoded, BEFORE TLS runs. The next camera turn
+// re-inits on demand (ensureCamera), and recoverAfterCamera() resettles
+// touch + audio codecs after the teardown churn — the same recovery pair
+// that was field-verified in v43–v46.
+void shutdownCameraBeforeNetwork() {
+  if (!g_camInited) return;
+  esp_camera_deinit();
+  g_camInited = false;
+  recoverAfterCamera();
+  Serial.println("[cam] deinit before network (cam_task quiet during TLS) + bus resettled");
+}
+
 bool touchPressed() {
   M5.update();
   return M5.Touch.getDetail().isPressed();
@@ -1474,13 +1493,18 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
       } else {
         Serial.println("[cam] fb_get failed, audio-only");
       }
-      // NO esp_camera_deinit, NO recovery: keep-alive camera, I2C untouched.
+      // Deinit happens below (shutdownCameraBeforeNetwork) once the JPEG is
+      // safely in our own buffer — cam_task must be gone before TLS runs.
     }
   } else if (cameraOk && !allowCamera) {
     Serial.println("[turn] audio-only retry — camera skipped this turn");
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
+
+  // The JPEG is already in our own buffer — the camera is no longer needed
+  // this turn. Take cam_task down before TLS starts (see the helper's comment).
+  shutdownCameraBeforeNetwork();
 
   faceSay(EMO_THINK, "생각 중...");
   // Off-thread POST + animated thinking face (pupils dart, eyes blink) so the
@@ -1581,7 +1605,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (keep-alive camera, StackChan-style)\n", kFwVersion);
+  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (camera quiet during TLS)\n", kFwVersion);
   // Those scary red "E (...) i2c: i2c_driver_delete(411)", "gdma: gdma_disconnect",
   // and "I2S: ...has not installed" lines are HARMLESS teardown noise from the
   // camera's per-turn driver install/free — NOT failures. They made the serial look
