@@ -930,6 +930,42 @@ void recoverSharedI2C() {
   Serial.println("[cam] shared I2C recovered (bus clocked free + re-begun)");
 }
 
+// Clocking the bus wires free (above) is NOT enough: the FT6336 touch controller
+// shares that bus and comes back with a stuck-"pressed" internal state, which is
+// what caused the phantom touches (self-opening volume panel, dead touch). This
+// resets the CONTROLLER, not just the wires:
+//   1) write its device-mode register back to normal working mode,
+//   2) poll until it reports a stable not-pressed for several samples,
+//   3) if it is STILL stuck, arm ignore-until-release so the loop never treats the
+//      phantom as a real tap.
+void settleTouchAfterCamera() {
+  const uint8_t kFt6336Addr = 0x38;   // CoreS3 capacitive touch on the internal bus
+  // Device-mode register (0x00) = 0x00 → normal working mode. Kicks the controller
+  // out of the half-state the camera's SCCB churn left it in.
+  M5.In_I2C.writeRegister8(kFt6336Addr, 0x00, 0x00, 100000);
+  delay(20);
+  int clean = 0;
+  const uint32_t start = millis();
+  while (millis() - start < 500) {
+    M5.update();
+    feedWatchdog();
+    if (!M5.Touch.getDetail().isPressed()) {
+      if (++clean >= 5) break;   // 5 consecutive not-pressed reads → settled clean
+    } else {
+      clean = 0;
+    }
+    delay(5);
+  }
+  if (M5.Touch.getDetail().isPressed()) {
+    g_ignoreTouchUntilRelease = true;   // still stuck → do not trust it as a tap
+    g_staleTouchIgnoreStart = millis();
+    g_lastStaleTouchRecover = 0;
+    Serial.println("[touch] still stuck after camera reset; ignoring until release");
+  } else {
+    Serial.println("[touch] controller settled clean after camera");
+  }
+}
+
 // Returns a FRESH frame. The DVP ring buffers hold frames captured earlier
 // (while idle), so we drop a couple of stale ones first — otherwise every turn
 // reuses the same old image. Caller must esp_camera_fb_return() the result.
@@ -1327,6 +1363,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
     // extra recoveries in the error branches below were removed — they just churned
     // the bus (repeated i2c_driver_delete errors) without adding safety.
     recoverSharedI2C();
+    settleTouchAfterCamera();   // reset the FT6336 so it doesn't come back phantom-pressed
   } else if (cameraOk && !allowCamera) {
     Serial.println("[turn] audio-only retry — camera skipped to keep the mic/bus clean");
   } else {
@@ -1430,7 +1467,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v42 (30s server timeout, fail fast)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v43 (reset touch controller after camera)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
