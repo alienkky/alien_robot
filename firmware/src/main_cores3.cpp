@@ -42,6 +42,7 @@
 #include "soc/rtc_cntl_reg.h"
 #include "esp_task_wdt.h"     // recover from hard hangs instead of staying frozen
 #include "esp_system.h"       // esp_reset_reason() — log why it last rebooted
+#include "esp_log.h"          // esp_log_level_set() — mute benign camera-teardown noise
 
 #include "config_cores3.h"
 
@@ -1520,7 +1521,15 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v46 (re-init mic+speaker, fix re-corrupt)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v47 (mute benign i2c/gdma/i2s log noise)");
+  // Those scary red "E (...) i2c: i2c_driver_delete(411)", "gdma: gdma_disconnect",
+  // and "I2S: ...has not installed" lines are HARMLESS teardown noise from the
+  // camera's per-turn driver install/free — NOT failures. They made the serial look
+  // broken even on successful turns. Silence these ESP-IDF components; our own
+  // [cam]/[mic]/[audio]/[turn] logs (real status) still print.
+  esp_log_level_set("i2c", ESP_LOG_NONE);
+  esp_log_level_set("gdma", ESP_LOG_NONE);
+  esp_log_level_set("I2S", ESP_LOG_NONE);
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
