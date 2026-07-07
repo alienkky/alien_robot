@@ -962,6 +962,34 @@ void waitForTouchReleaseBounded() {
   g_staleTouchIgnoreStart = millis();
 }
 
+// Confirm a DELIBERATE vertical swipe from the touch that just went down.
+// dirUp=true wants an upward drag (volume panel), false a downward drag (battery).
+// Hardened against the phantom/stuck touches the camera leaves on the shared I2C
+// bus — those were opening the volume panel by themselves:
+//   • bigger travel (70px, was 50) and
+//   • the finger must HOLD past the threshold for several consecutive reads, so a
+//     one-frame jitter spike no longer counts, and
+//   • the whole thing is time-bounded so a stuck phantom can never hang the loop.
+bool confirmSwipe(bool dirUp) {
+  const int kThreshold = 70;
+  const int kNeedConsecutive = 3;
+  const uint32_t kMaxMs = 700;
+  int hits = 0;
+  const uint32_t start = millis();
+  while (millis() - start < kMaxMs) {
+    M5.update();
+    feedWatchdog();
+    auto d = M5.Touch.getDetail();
+    if (!d.isPressed()) return false;   // finger lifted → not a swipe
+    const int dy = d.distanceY();
+    const bool past = dirUp ? (dy < -kThreshold) : (dy > kThreshold);
+    hits = past ? hits + 1 : 0;         // must be SUSTAINED, not a single jitter spike
+    if (hits >= kNeedConsecutive) return true;
+    delay(10);
+  }
+  return false;                         // timed out → treat as no swipe (never hangs)
+}
+
 // Records mic PCM into the PSRAM buffer. In holdMode, stops when the touch is
 // released; otherwise records the full window (used by the serial trigger).
 // Returns the number of int16 samples captured.
@@ -1401,7 +1429,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v40 (stabilize: audio-only retries, less I2C churn)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v41 (harden swipe: no phantom volume popup)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1505,37 +1533,20 @@ void loop() {
   }
   if (!g_ignoreTouchUntilRelease && td.wasPressed()) {
     if (td.base_y < 40) {
-      // Top strip: a downward swipe pulls down the battery status (phone-style).
-      bool swiped = false;
-      while (true) {
-        M5.update();
-        feedWatchdog();
-        auto d = M5.Touch.getDetail();
-        if (!d.isPressed()) break;
-        if (d.distanceY() > 50) { swiped = true; break; }
-        delay(10);
-      }
-      if (swiped) {
+      // Top strip: a deliberate downward swipe pulls down the battery status.
+      if (confirmSwipe(/*dirUp=*/false)) {
         showBattery();
         waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
-      // released at the top without swiping -> ignore (not a talk trigger)
+      // released/jittered at the top without a real swipe -> ignore
     } else if (td.base_y > 200) {
-      // Bottom strip: an UPWARD swipe pulls up the volume panel (phone-style).
-      bool swiped = false;
-      while (true) {
-        M5.update();
-        feedWatchdog();
-        auto d = M5.Touch.getDetail();
-        if (!d.isPressed()) break;
-        if (d.distanceY() < -50) { swiped = true; break; }
-        delay(10);
-      }
-      if (swiped) {
+      // Bottom strip: a deliberate UPWARD swipe pulls up the volume panel. The
+      // hardened confirmSwipe() stops the phantom-touch auto-open seen in the log.
+      if (confirmSwipe(/*dirUp=*/true)) {
         showVolumeControl();
         waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
-      // tap at the bottom without swiping up -> ignore (not a talk trigger)
+      // tap/jitter at the bottom without a real swipe -> ignore (not a talk trigger)
     } else if (g_tapToListenNext) {
       // Right after a "잘 안 들렸어요 — 다시 말해줘" (or any failed turn), a plain
       // TAP goes straight into listening (fixed window, no need to keep holding).
