@@ -969,6 +969,23 @@ void settleTouchAfterCamera() {
   }
 }
 
+// The ES7210 mic codec is the OTHER victim of the shared bus: after a camera turn
+// (and the bus-recovery bit-bang) it comes back silent — [mic] peak≈1 — which shows
+// up as an endless "소리가 작아요" after the first vision turn. Force a full codec
+// re-init through M5's own path (end → begin → end) so its registers are reloaded
+// on the freshly-recovered bus; recordAudio() then begin()s a clean mic next turn.
+void settleMicAfterCamera() {
+  M5.Speaker.end();
+  M5.Mic.end();
+  delay(10);
+  if (M5.Mic.begin()) {
+    Serial.println("[mic] codec re-initialized after camera");
+  } else {
+    Serial.println("[mic] re-init begin FAILED after camera");
+  }
+  M5.Mic.end();   // leave ended; recordAudio() opens it fresh on the next turn
+}
+
 // Returns a FRESH frame. The DVP ring buffers hold frames captured earlier
 // (while idle), so we drop a couple of stale ones first — otherwise every turn
 // reuses the same old image. Caller must esp_camera_fb_return() the result.
@@ -1387,6 +1404,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
     // the bus (repeated i2c_driver_delete errors) without adding safety.
     recoverSharedI2C();
     settleTouchAfterCamera();   // reset the FT6336 so it doesn't come back phantom-pressed
+    settleMicAfterCamera();     // reload the ES7210 so the mic isn't left silent (peak≈1)
   } else if (cameraOk && !allowCamera) {
     Serial.println("[turn] audio-only retry — camera skipped to keep the mic/bus clean");
   } else {
@@ -1490,7 +1508,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v44 (stop phantom auto-listen loop)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v45 (re-init mic codec after camera)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
