@@ -73,7 +73,10 @@ def require_api_token(request: Request) -> None:
     """Reject the request when API_TOKEN is set and the caller does not match.
 
     Backward compatible: if API_TOKEN is empty/unset, auth is disabled and every
-    request passes. Accepts either `Authorization: Bearer <token>` or `X-API-Key`.
+    request passes. Accepts `Authorization: Bearer <token>`, `X-API-Key`, or
+    `X-Device-Token` — the CoreS3 firmware sends the last one (DEVICE_TOKEN).
+    Matters because the gateway is exposed publicly via Tailscale Funnel
+    (https://alien-4090...ts.net:8443); without a token that endpoint is open.
     """
     expected = env("API_TOKEN")
     if not expected:
@@ -83,6 +86,8 @@ def require_api_token(request: Request) -> None:
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     if not token:
         token = request.headers.get("x-api-key", "").strip()
+    if not token:
+        token = request.headers.get("x-device-token", "").strip()
     if token != expected:
         raise HTTPException(status_code=401, detail="Invalid or missing API token")
 
@@ -439,16 +444,18 @@ async def turn(request: Request) -> dict[str, str | None]:
 
 @app.post("/api/see")
 async def see(
+    request: Request,
     audio: UploadFile = File(..., description="raw 16kHz mono s16le PCM"),
     image: UploadFile | None = File(None, description="JPEG camera frame"),
     text: str | None = Form(None, description="optional text instead of audio STT"),
 ) -> dict[str, str | None]:
     """Vision turn for the camera firmware: PCM (or text) + a JPEG frame.
 
-    Mirrors /api/turn but multipart, so the ESP32-S3 (Waveshare 3.5B + OV5640)
-    can attach what the camera sees. Use LLM_PROVIDER=brain180 for the Brain180
-    bridge, or LLM_PROVIDER=openai for the fast cloud fallback.
+    Mirrors /api/turn but multipart, so the ESP32-S3 (CoreS3 / Waveshare) can
+    attach what the camera sees. LLM_PROVIDER=vllm runs it on the local 4090
+    (fast + private); brain180/openai are the cloud paths.
     """
+    require_api_token(request)
     t0 = time.perf_counter()
     if text and text.strip():
         transcript = text.strip()
