@@ -35,6 +35,24 @@ def _ms(start: float) -> int:
     """Elapsed milliseconds since `start` (a time.perf_counter() value)."""
     return int((time.perf_counter() - start) * 1000)
 
+
+def looks_like_jpeg(raw: bytes) -> bool:
+    """Cheap structural check that `raw` is a complete JPEG frame.
+
+    The CoreS3 camera shares an I2C/SPI bus with the audio codec and touch
+    controller; a bus glitch can hand us a truncated frame. vLLM/OpenAI then
+    reject it with a hard 400 ("cannot identify image file") and the whole
+    turn fails. Guarding here lets a bad frame degrade to a text-only answer
+    instead of killing the conversation. Marker-based so we need no Pillow
+    dependency: JPEG starts with SOI (FF D8) and ends with EOI (FF D9); a
+    truncated frame is missing the trailing EOI.
+    """
+    return (
+        len(raw) >= 512
+        and raw[:2] == b"\xff\xd8"
+        and raw[-2:] == b"\xff\xd9"
+    )
+
 APP_DIR = Path(__file__).resolve().parent
 ARTIFACT_DIR = APP_DIR / "artifacts"
 ARTIFACT_DIR.mkdir(exist_ok=True)
@@ -448,8 +466,15 @@ async def see(
     image_b64: str | None = None
     if image is not None:
         raw = await image.read()
-        if raw:
+        if raw and looks_like_jpeg(raw):
             image_b64 = base64.b64encode(raw).decode("ascii")
+        elif raw:
+            # Truncated/garbled camera frame — drop it and answer text-only
+            # rather than letting the vision model 400 the whole turn.
+            log.warning(
+                "[see] dropping bad camera frame (%d bytes, soi=%s eoi=%s) -> text-only",
+                len(raw), raw[:2] == b"\xff\xd8", raw[-2:] == b"\xff\xd9",
+            )
 
     t1 = time.perf_counter()
     answer = await ask_llm(transcript, image_b64)
