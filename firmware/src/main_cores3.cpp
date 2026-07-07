@@ -969,21 +969,32 @@ void settleTouchAfterCamera() {
   }
 }
 
-// The ES7210 mic codec is the OTHER victim of the shared bus: after a camera turn
-// (and the bus-recovery bit-bang) it comes back silent — [mic] peak≈1 — which shows
-// up as an endless "소리가 작아요" after the first vision turn. Force a full codec
-// re-init through M5's own path (end → begin → end) so its registers are reloaded
-// on the freshly-recovered bus; recordAudio() then begin()s a clean mic next turn.
-void settleMicAfterCamera() {
+// BOTH audio codecs sit on the bus the camera churned + the recovery bit-banged,
+// and both come back dead: the ES7210 mic reads peak≈1 ("소리가 작아요" loop) AND
+// the AW88298 speaker plays the TTS answer to SILENCE (음성 재생 안됨) even though
+// the server returned an audio_url. begin() alone can no-op, so force a full
+// reconfigure of each by calling begin() (which rewrites the codec registers) on
+// the recovered bus, then leave them ended for recordAudio()/playWav() to reopen.
+void settleAudioAfterCamera() {
   M5.Speaker.end();
   M5.Mic.end();
   delay(10);
-  if (M5.Mic.begin()) {
-    Serial.println("[mic] codec re-initialized after camera");
-  } else {
-    Serial.println("[mic] re-init begin FAILED after camera");
-  }
-  M5.Mic.end();   // leave ended; recordAudio() opens it fresh on the next turn
+  const bool micOk = M5.Mic.begin();
+  M5.Mic.end();
+  const bool spkOk = M5.Speaker.begin();
+  M5.Speaker.end();
+  Serial.printf("[audio] codecs re-initialized after camera (mic=%d spk=%d)\n",
+                micOk ? 1 : 0, spkOk ? 1 : 0);
+}
+
+// One place that fully restores the shared bus after the camera touched it: clock
+// the wires free, reset the touch controller, AND reload both audio codecs. Called
+// after EVERY camera-driven bus recovery (mid-turn capture AND post-answer) so a
+// later recover can never leave the mic/speaker/touch corrupted for the next turn.
+void recoverAfterCamera() {
+  recoverSharedI2C();
+  settleTouchAfterCamera();
+  settleAudioAfterCamera();
 }
 
 // Returns a FRESH frame. The DVP ring buffers hold frames captured earlier
@@ -1398,13 +1409,11 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
       Serial.println("[cam] fb_get failed, audio-only");
     }
     esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
-    // Recover the shared I2C bus ONCE, right after the camera touched it, so the
-    // next touch read cannot stall the loop (the permanent-freeze cause). The old
-    // extra recoveries in the error branches below were removed — they just churned
-    // the bus (repeated i2c_driver_delete errors) without adding safety.
-    recoverSharedI2C();
-    settleTouchAfterCamera();   // reset the FT6336 so it doesn't come back phantom-pressed
-    settleMicAfterCamera();     // reload the ES7210 so the mic isn't left silent (peak≈1)
+    // Recover the shared I2C bus right after the camera touched it — and reset the
+    // touch controller + reload BOTH audio codecs, so touch, mic and speaker all
+    // come back healthy. (The old error-branch recoveries were removed in v40;
+    // they just churned the bus without re-settling the peripherals.)
+    recoverAfterCamera();
   } else if (cameraOk && !allowCamera) {
     Serial.println("[turn] audio-only retry — camera skipped to keep the mic/bus clean");
   } else {
@@ -1448,7 +1457,10 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
     waitAnswerInterruptWindow(800);
   }
-  if (usedCamera) recoverSharedI2C();   // only if the camera touched the bus this turn
+  // The answer just played; this final bus recovery MUST also re-settle touch +
+  // audio codecs, or its bit-bang re-corrupts the mic/speaker that were fine during
+  // this turn — which was why the NEXT turn went silent (peak=1) again.
+  if (usedCamera) recoverAfterCamera();
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
@@ -1508,7 +1520,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v45 (re-init mic codec after camera)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v46 (re-init mic+speaker, fix re-corrupt)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
