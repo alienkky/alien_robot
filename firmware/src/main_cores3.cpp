@@ -92,7 +92,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v49";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v50";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -888,7 +888,17 @@ void showPhoto(camera_fb_t *fb) {
 //   • This is only ever called from handleTurn AFTER recordAudio(), never at boot,
 //     so a camera hiccup can never poison the mic for a whole session, and the
 //     current turn's audio is already captured before we touch the bus.
-bool setupCamera() {
+// v50 — StackChan-style KEEP-ALIVE camera. Camera-equipped StackChan builds on
+// this same CoreS3 work because they init the camera ONCE and never tear it down;
+// our per-turn esp_camera_init/deinit churned the shared I2C every turn, and that
+// repeated churn is what kept killing the ES7210/AW88298 codecs (v48/v49 logs:
+// begin() "succeeds" but the codecs stay dead). Frames flow over DVP, which does
+// NOT use I2C — so after this single init + single settle, the bus is never
+// touched by the camera again and the codecs keep the healthy boot-time config.
+bool g_camInited = false;
+
+bool ensureCamera() {
+  if (g_camInited) return true;           // already alive — capture is I2C-free
   camera_config_t c = makeCameraConfig();
   M5.In_I2C.release();                    // free port 1 so the camera can probe SCCB
   esp_err_t err = esp_camera_init(&c);
@@ -900,13 +910,16 @@ bool setupCamera() {
       if (s->set_vflip) s->set_vflip(s, CAM_VFLIP);
     }
   }
+  // SCCB was only needed to CONFIGURE the sensor. Hand the pins back to M5 and
+  // keep the camera (cam_task + DVP) alive for the rest of the session.
   i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));
   M5.In_I2C.begin();                      // M5 reclaims the shared bus, pass or fail
   if (err != ESP_OK) {
     Serial.printf("[cam] init failed 0x%x — audio-only this turn (try CAM_SCCB_I2C_PORT=0)\n", err);
     return false;
   }
-  Serial.println("[cam] GC0308 init OK");
+  g_camInited = true;
+  Serial.println("[cam] GC0308 init OK (keep-alive: one-time init, no per-turn churn)");
   return true;
 }
 
@@ -1435,33 +1448,36 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
 
   // Camera is optional. When available: grab one frame, SHOW it on the display
   // ("what the robot saw"), then software-encode it to JPEG for the upload.
-  // On-demand camera: init only for this capture, then deinit. The cam_task
-  // stack overflows if the camera runs continuously (the reboot cause), so we
-  // never leave it running at idle.
+  // v50 keep-alive: the camera inits ONCE on its first use and stays alive
+  // (StackChan-with-camera architecture). Captures are pure DVP — no I2C — so
+  // after the one-time init+settle below, turns never churn the bus again and
+  // the audio codecs keep working. (The old per-turn init/deinit was the churn
+  // that killed the ES7210/AW88298 every turn.)
   uint8_t *jpeg = nullptr;
   size_t jpegLen = 0;
-  bool usedCamera = false;   // gates the I2C recovery below — no camera, nothing to recover
-  if (cameraOk && allowCamera && setupCamera()) {
-    usedCamera = true;
-    camera_fb_t *fb = captureFresh();
-    if (fb) {
-      showPhoto(fb);  // display the captured photo for ~1.5s
-      if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
-      Serial.printf("[cam] captured %ux%u -> jpeg %u bytes\n",
-                    static_cast<unsigned>(fb->width), static_cast<unsigned>(fb->height),
-                    static_cast<unsigned>(jpegLen));
-      esp_camera_fb_return(fb);
-    } else {
-      Serial.println("[cam] fb_get failed, audio-only");
+  if (cameraOk && allowCamera) {
+    const bool firstInit = !g_camInited;
+    if (ensureCamera()) {
+      if (firstInit) {
+        // The single init DID churn the bus once — recover + resettle touch and
+        // audio codecs this one time. Never again after this.
+        recoverAfterCamera();
+      }
+      camera_fb_t *fb = captureFresh();
+      if (fb) {
+        showPhoto(fb);  // display the captured photo for ~1.5s
+        if (!frame2jpg(fb, kJpegQuality, &jpeg, &jpegLen)) Serial.println("[cam] frame2jpg failed");
+        Serial.printf("[cam] captured %ux%u -> jpeg %u bytes\n",
+                      static_cast<unsigned>(fb->width), static_cast<unsigned>(fb->height),
+                      static_cast<unsigned>(jpegLen));
+        esp_camera_fb_return(fb);
+      } else {
+        Serial.println("[cam] fb_get failed, audio-only");
+      }
+      // NO esp_camera_deinit, NO recovery: keep-alive camera, I2C untouched.
     }
-    esp_camera_deinit();  // stop cam_task right away — avoids the stack-overflow reboot
-    // Recover the shared I2C bus right after the camera touched it — and reset the
-    // touch controller + reload BOTH audio codecs, so touch, mic and speaker all
-    // come back healthy. (The old error-branch recoveries were removed in v40;
-    // they just churned the bus without re-settling the peripherals.)
-    recoverAfterCamera();
   } else if (cameraOk && !allowCamera) {
-    Serial.println("[turn] audio-only retry — camera skipped to keep the mic/bus clean");
+    Serial.println("[turn] audio-only retry — camera skipped this turn");
   } else {
     Serial.println("[turn] camera unavailable, audio-only");
   }
@@ -1503,10 +1519,9 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   if (!fetchAndPlay(String(audioUrl)) && audioUrl[0]) {
     waitAnswerInterruptWindow(800);
   }
-  // The answer just played; this final bus recovery MUST also re-settle touch +
-  // audio codecs, or its bit-bang re-corrupts the mic/speaker that were fine during
-  // this turn — which was why the NEXT turn went silent (peak=1) again.
-  if (usedCamera) recoverAfterCamera();
+  // v50: no post-answer bus recovery. The keep-alive camera never touches I2C
+  // after its one-time init, so there is nothing to recover — and recovering here
+  // was itself re-corrupting the codecs (the v46 finding).
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
@@ -1566,7 +1581,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (codec probe + beep self-test)\n", kFwVersion);
+  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (keep-alive camera, StackChan-style)\n", kFwVersion);
   // Those scary red "E (...) i2c: i2c_driver_delete(411)", "gdma: gdma_disconnect",
   // and "I2S: ...has not installed" lines are HARMLESS teardown noise from the
   // camera's per-turn driver install/free — NOT failures. They made the serial look
