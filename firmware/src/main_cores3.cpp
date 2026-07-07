@@ -85,7 +85,7 @@ String g_wifiSsid;                         // optional NVS override; blank = con
 String g_wifiPass;                         // optional NVS override; never printed
 constexpr uint8_t kJpegQuality = 80;   // frame2jpg quality 0..100
 constexpr uint32_t kWatchdogTimeoutSec = 12;      // hard hang -> automatic reboot
-constexpr uint32_t kSeeHardRestartMs = 135000UL;  // HTTP timeout is 120s + margin
+constexpr uint32_t kSeeHardRestartMs = 60000UL;   // backstop above 30s read + 15s connect
 constexpr int32_t kMinSpeechPeakForServer = 300;  // below this, STT returns 422 and camera/I2C risk is wasted
 constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a stale touch state
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
@@ -1131,13 +1131,14 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   WiFiClientSecure secure;
   WiFiClient plain;
   httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/see");
-  // A vision turn is STT + Brain180 (vision LLM) + TTS on the server. On the
-  // 4090 this measured ~62s WITH an image — just over the old 60s read timeout,
-  // so it failed with error(-11) by ~2s despite the server still working. Give
-  // it 120s of headroom; the animated elapsed-seconds counter keeps the wait
-  // visibly alive. (Server latency itself is an infra concern, flagged separately.)
+  // A normal turn on the current server (Kimi via brain180) answers in ~3s, so a
+  // response that has not arrived in 30s means the server is stuck/overloaded, not
+  // "still working". The old 120s cap made the board sit on "생각 중" for a full
+  // minute before failing, which is when the phantom-touch / volume-popup mess
+  // piles up. Cap the wait at 30s so it fails fast and recovers; the underlying
+  // server slowness is an infra concern flagged separately.
   http.setConnectTimeout(15000);
-  http.setTimeout(120000);
+  http.setTimeout(30000);
   if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   http.addHeader("Content-Type", "multipart/form-data; boundary=" + boundary);
   uint32_t t0 = millis();
@@ -1429,7 +1430,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v41 (harden swipe: no phantom volume popup)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v42 (30s server timeout, fail fast)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
