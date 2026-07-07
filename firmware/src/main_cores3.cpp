@@ -92,7 +92,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v51";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v52";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -936,6 +936,14 @@ void recoverSharedI2C() {
   const int kSdaPin = 12, kSclPin = 11;  // CoreS3 internal I2C (port 1)
   M5.In_I2C.release();
   i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));  // harmless if gone
+  // v52: esp_camera_deinit() tears the I2C peripheral down behind the Arduino
+  // HAL's back, but the HAL keeps its "already started" flag. The later
+  // M5.In_I2C.begin() then NO-OPs ("Wire: Bus already started in Master Mode")
+  // and the bus is never truly re-initialised — field logs show every codec
+  // NO-ACK from that point on (mic peak=1 on the next turn). Clearing the HAL
+  // state here forces begin() below to do a real re-init (the "i2cInit()" log
+  // line reappears).
+  if (i2cIsInit(CAM_SCCB_I2C_PORT)) i2cDeinit(CAM_SCCB_I2C_PORT);
 
   // Clock the bus free: with SDA released (input), pulse SCL until the slave
   // stops holding SDA low (or 9 tries — one full byte + ack).
@@ -1637,6 +1645,24 @@ void setup() {
     default:               rr = "OTHER"; break;
   }
   Serial.printf("[boot] last reset reason = %s\n", rr);
+
+  // v52 baseline probe: BEFORE any camera has ever touched the bus, do both
+  // codecs ACK, and is the speaker audible? Field logs show aw88298 NO-ACK on
+  // every post-camera probe — this tells us whether the amp was ever alive at
+  // all this session (NO-ACK here too = amp/power problem, nothing to do with
+  // the camera; ACK here = the camera path knocks it off later).
+  {
+    const bool micAck = M5.In_I2C.scanID(0x40);   // ES7210 mic codec
+    const bool spkAck = M5.In_I2C.scanID(0x36);   // AW88298 speaker amp
+    Serial.printf("[audio] BOOT probe: es7210(mic)=%s aw88298(spk)=%s\n",
+                  micAck ? "ACK" : "NO-ACK", spkAck ? "ACK" : "NO-ACK");
+    M5.Speaker.begin();
+    M5.Speaker.setVolume(g_speakerVolume);
+    M5.Speaker.tone(880, 150);                    // boot beep — audible = amp alive
+    delay(200);
+    M5.Speaker.end();
+    Serial.println("[audio] BOOT beep sent (880Hz 150ms) — silent = amp dead before camera");
+  }
 
   // Watch the loop task. If touch/I2C wedges again, reboot instead of staying
   // permanently frozen until power-cycled.
