@@ -29,6 +29,7 @@
 #include <climits>  // INT_MIN sentinel for the optional pupil-offset args
 
 #include <M5Unified.h>
+#include <Wire.h>   // Wire1.end() — the only call that clears TwoWire's stale 'begun' flag
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
@@ -92,7 +93,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v52";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v53";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -935,15 +936,19 @@ bool ensureCamera() {
 void recoverSharedI2C() {
   const int kSdaPin = 12, kSclPin = 11;  // CoreS3 internal I2C (port 1)
   M5.In_I2C.release();
+  // v53: M5.In_I2C.begin() runs through TwoWire (Wire1 on this port), and
+  // TwoWire keeps its own 'begun' flag SEPARATE from the esp32-hal state.
+  // After esp_camera_deinit() that flag goes stale: begin() logs
+  // "Wire: Bus already started in Master Mode" and EARLY-RETURNS without
+  // touching the hardware — so the bus stays dead and every codec NO-ACKs
+  // (field logs: es7210 NO-ACK x3, next-turn mic peak=1). v52 cleared only
+  // the HAL flag, which made begin() a no-op on a DEINITED bus — worse.
+  // Wire1.end() is the one call that clears the TwoWire flag AND deinits the
+  // HAL together, so the begin() below performs a true re-init ("i2cInit()"
+  // reappears in the log).
+  Wire1.end();
   i2c_driver_delete(static_cast<i2c_port_t>(CAM_SCCB_I2C_PORT));  // harmless if gone
-  // v52: esp_camera_deinit() tears the I2C peripheral down behind the Arduino
-  // HAL's back, but the HAL keeps its "already started" flag. The later
-  // M5.In_I2C.begin() then NO-OPs ("Wire: Bus already started in Master Mode")
-  // and the bus is never truly re-initialised — field logs show every codec
-  // NO-ACK from that point on (mic peak=1 on the next turn). Clearing the HAL
-  // state here forces begin() below to do a real re-init (the "i2cInit()" log
-  // line reappears).
-  if (i2cIsInit(CAM_SCCB_I2C_PORT)) i2cDeinit(CAM_SCCB_I2C_PORT);
+  if (i2cIsInit(CAM_SCCB_I2C_PORT)) i2cDeinit(CAM_SCCB_I2C_PORT);  // belt & braces
 
   // Clock the bus free: with SDA released (input), pulse SCL until the slave
   // stops holding SDA low (or 9 tries — one full byte + ack).
@@ -1230,6 +1235,16 @@ bool playWav(const uint8_t *wav, size_t len) {
                 static_cast<unsigned>(n), static_cast<unsigned>(rate), g_speakerVolume);
 
   M5.Mic.end();  // free the shared I2S before switching to the speaker
+  // v53: prove the amp is reachable at the exact moment we play. If the
+  // AW88298 fell off the bus (post-camera), Speaker.begin()'s config writes
+  // fail silently and playRaw pushes samples into a muted amp. Probe, and on
+  // NO-ACK do one bus recovery + re-probe so the playback attempt is honest.
+  bool spkAck = M5.In_I2C.scanID(0x36);
+  if (!spkAck) {
+    recoverSharedI2C();
+    spkAck = M5.In_I2C.scanID(0x36);
+  }
+  Serial.printf("[audio] pre-play amp probe: aw88298=%s\n", spkAck ? "ACK" : "NO-ACK (expect silence)");
   M5.Speaker.begin();
   M5.Speaker.setVolume(g_speakerVolume);
   M5.Speaker.playRaw(samples, n, rate, false);
