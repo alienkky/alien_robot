@@ -93,7 +93,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v54";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v55";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -1111,23 +1111,45 @@ camera_fb_t *captureFresh() {
   return esp_camera_fb_get();
 }
 
-// v51: quiet the camera before the network phase. The prebuilt esp32-camera
-// driver's cam_task has a small FIXED stack we cannot grow from Arduino, and
-// with the v50 keep-alive camera it kept pumping DVP frames concurrently with
-// the HTTPS/TLS handshake of the gateway POST. That combination overflows the
-// cam_task stack — field crash "Stack canary watchpoint triggered (cam_task)"
-// → PANIC reboot right at "생각 중" (first seen the moment the Funnel https
-// URL went live; plain-http turns never triggered it). So: tear the camera
-// down after the JPEG is encoded, BEFORE TLS runs. The next camera turn
-// re-inits on demand (ensureCamera), and recoverAfterCamera() resettles
-// touch + audio codecs after the teardown churn — the same recovery pair
-// that was field-verified in v43–v46.
-void shutdownCameraBeforeNetwork() {
+// v55: SUSPEND cam_task during the network phase instead of deiniting the
+// camera. History of why both previous strategies failed on real hardware:
+//   - keep-alive + TLS (v50): cam_task (small fixed stack inside the prebuilt
+//     esp32-camera driver) overflows while pumping DVP frames concurrently
+//     with the HTTPS handshake → "Stack canary watchpoint (cam_task)" PANIC.
+//   - deinit before TLS (v51–v54): esp_camera_deinit() poisons the shared
+//     I2C beyond every recovery attempt we made (stale TwoWire state, codecs
+//     NO-ACK) → mic dead from the 2nd turn on, amp silent.
+// vTaskSuspend threads the needle: cam_task cannot run (cannot overflow)
+// while TLS runs, the camera driver stays alive (NO I2C churn, NO deinit
+// poison), and vTaskResume brings frames back for the next turn. A suspended
+// cam_task just means the DVP ISR drops frames into a full queue — harmless,
+// and captureFresh() drains stale frames anyway.
+TaskHandle_t g_camTaskHandle = nullptr;
+bool g_camSuspended = false;
+
+void suspendCameraForNetwork() {
   if (!g_camInited) return;
-  esp_camera_deinit();
-  g_camInited = false;
-  recoverAfterCamera();
-  Serial.println("[cam] deinit before network (cam_task quiet during TLS) + bus resettled");
+  if (!g_camTaskHandle) g_camTaskHandle = xTaskGetHandle("cam_task");
+  if (g_camTaskHandle) {
+    vTaskSuspend(g_camTaskHandle);
+    g_camSuspended = true;
+    Serial.println("[cam] cam_task suspended (TLS-safe, I2C untouched)");
+  } else {
+    // Handle lookup failed — fall back to the v51 deinit path so the TLS
+    // crash cannot come back, accepting the known bus-churn cost.
+    Serial.println("[cam] cam_task handle NOT FOUND — fallback: deinit before network");
+    esp_camera_deinit();
+    g_camInited = false;
+    recoverAfterCamera();
+  }
+}
+
+void resumeCameraAfterTurn() {
+  if (g_camSuspended && g_camTaskHandle) {
+    vTaskResume(g_camTaskHandle);
+    g_camSuspended = false;
+    Serial.println("[cam] cam_task resumed");
+  }
 }
 
 bool touchPressed() {
@@ -1571,8 +1593,8 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   }
 
   // The JPEG is already in our own buffer — the camera is no longer needed
-  // this turn. Take cam_task down before TLS starts (see the helper's comment).
-  shutdownCameraBeforeNetwork();
+  // this turn. Freeze cam_task before TLS starts (see the helper's comment).
+  suspendCameraForNetwork();
 
   faceSay(EMO_THINK, "생각 중...");
   // Off-thread POST + animated thinking face (pupils dart, eyes blink) so the
@@ -1589,6 +1611,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
     else if (g_seeCode == -11) faceSay(EMO_NEUTRAL, "서버가 느려요 — 다시 말해줘");
     else if (g_seeCode == -1 || g_seeCode == 0) faceSay(EMO_SAD, "서버 연결 안됨");
     else faceSay(EMO_SAD, "서버 문제 (다시 시도)");
+    resumeCameraAfterTurn();
     return;
   }
 
@@ -1596,6 +1619,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   if (deserializeJson(doc, resp)) {
     Serial.println("[turn] bad JSON response");
     faceSay(EMO_SAD, "응답 오류");
+    resumeCameraAfterTurn();
     return;
   }
   const char *transcript = doc["transcript"] | "";
@@ -1614,6 +1638,7 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   // v50: no post-answer bus recovery. The keep-alive camera never touches I2C
   // after its one-time init, so there is nothing to recover — and recovering here
   // was itself re-corrupting the codecs (the v46 finding).
+  resumeCameraAfterTurn();   // playback done — frames may flow again
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
 }
 
