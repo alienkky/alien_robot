@@ -90,6 +90,7 @@ constexpr int32_t kMinSpeechPeakForServer = 300;  // below this, STT returns 422
 constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a stale touch state
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
+constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -98,8 +99,10 @@ bool g_queueImmediateTurn = false;
 // After a turn that failed to get an answer (too short/quiet, "잘 안 들렸어요 —
 // 다시 말해줘", server error), the next screen tap should jump straight into
 // listening — a plain tap, no press-and-hold. Set on every turn, cleared only
-// when a real answer comes back.
+// when a real answer comes back. Time-boxed (see kTapToListenWindowMs): a stale
+// flag must NOT let a phantom touch auto-launch listening minutes later.
 bool g_tapToListenNext = false;
+uint32_t g_tapToListenArmedMs = 0;   // when tap-to-listen was armed
 uint32_t g_lastStaleTouchRecover = 0;
 uint32_t g_staleTouchIgnoreStart = 0;
 
@@ -1026,6 +1029,23 @@ bool confirmSwipe(bool dirUp) {
   return false;                         // timed out → treat as no swipe (never hangs)
 }
 
+// Require the touch to STAY pressed for a short moment — a deliberate finger, not
+// a phantom glitch that flickers "pressed" for a frame after the camera churns the
+// I2C bus. Used to gate the tap-to-listen retry so phantom edges can't auto-launch
+// a listen turn. Returns false the instant it lifts.
+bool confirmRealPress() {
+  const uint32_t start = millis();
+  int held = 0;
+  while (millis() - start < 140) {
+    M5.update();
+    feedWatchdog();
+    if (!M5.Touch.getDetail().isPressed()) return false;  // lifted → not deliberate
+    if (++held >= 6) return true;                          // ~60ms sustained → real
+    delay(10);
+  }
+  return held >= 6;
+}
+
 // Records mic PCM into the PSRAM buffer. In holdMode, stops when the touch is
 // released; otherwise records the full window (used by the serial trigger).
 // Returns the number of int16 samples captured.
@@ -1318,8 +1338,11 @@ void handleTurn(bool holdMode, bool allowCamera = true) {
   }
 
   // Assume this turn may not land an answer; if so, the next tap should go
-  // straight to listening. Cleared below once a real answer arrives.
+  // straight to listening. Cleared below once a real answer arrives. Time-stamp
+  // the arming so a stale flag expires (kTapToListenWindowMs) instead of letting
+  // a phantom touch auto-start listening long after.
   g_tapToListenNext = true;
+  g_tapToListenArmedMs = millis();
 
   faceSay(EMO_LISTEN, "듣는 중...");
   size_t samples = recordAudio(holdMode);
@@ -1467,7 +1490,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v43 (reset touch controller after camera)");
+  Serial.println("[boot] alien_robot CoreS3 fw route-A v44 (stop phantom auto-listen loop)");
   Serial.printf("[boot] gateway = %s\n", AI_SERVER_BASE_URL);
 
   // Restore the saved speaker volume (defaults to kDefaultVolume on first boot).
@@ -1585,20 +1608,25 @@ void loop() {
         waitForTouchReleaseBounded();  // consume the rest of the gesture
       }
       // tap/jitter at the bottom without a real swipe -> ignore (not a talk trigger)
-    } else if (g_tapToListenNext) {
-      // Right after a "잘 안 들렸어요 — 다시 말해줘" (or any failed turn), a plain
-      // TAP goes straight into listening (fixed window, no need to keep holding).
-      // Retry is AUDIO-ONLY (allowCamera=false): the camera is what corrupts the
-      // mic and jams touch, so skipping it lets the retry actually succeed instead
-      // of spiralling through more 422s and stale-touch recoveries.
-      Serial.println("[turn] tap-to-listen (retry after unheard, audio-only)");
-      handleTurn(/*holdMode=*/false, /*allowCamera=*/false);
-      runQueuedImmediateTurns();
-      waitForTouchReleaseBounded();
     } else {
-      handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
+      // Centre press = talk. Tap-to-listen (a plain tap that jumps straight into
+      // an audio-only listen) only applies RIGHT AFTER a failed turn AND for a
+      // deliberate, sustained press. Both guards exist to kill the "자동으로 듣는
+      // 중 반복" loop: a stale flag + a phantom touch was auto-launching listen
+      // turns over and over. Otherwise fall back to normal hold-to-talk.
+      const bool retryWindow = g_tapToListenNext &&
+                               (millis() - g_tapToListenArmedMs < kTapToListenWindowMs);
+      if (retryWindow && confirmRealPress()) {
+        Serial.println("[turn] tap-to-listen (retry after unheard, audio-only)");
+        handleTurn(/*holdMode=*/false, /*allowCamera=*/false);
+      } else {
+        if (g_tapToListenNext && !retryWindow) {
+          g_tapToListenNext = false;   // window expired — do not auto-listen anymore
+        }
+        handleTurn(/*holdMode=*/true);       // hold the face (centre) to talk
+      }
       runQueuedImmediateTurns();
-      waitForTouchReleaseBounded();         // wait for release, but never forever
+      waitForTouchReleaseBounded();           // wait for release, but never forever
     }
   } else if (serialCmd == 'b') {
     showBattery();                          // serial 'b' = show battery (testing)
