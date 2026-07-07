@@ -7,3 +7,4 @@ backend/.env
 backend/artifacts/
 firmware/include/config.h
 firmware/include/config_waveshare.h
+firmware/include/config_cores3.h

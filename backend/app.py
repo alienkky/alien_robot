@@ -170,6 +170,72 @@ def reset_robot_history() -> None:
     _robot_history.clear()
 
 
+async def ask_openai_direct(transcript: str, image_b64: str | None = None) -> str:
+    api_key = env("OPENAI_API_KEY")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured")
+
+    system_prompt = env("SYSTEM_PROMPT") or (
+        "You are a concise Korean voice assistant for a small desk robot. "
+        "Answer naturally in Korean in one or two short sentences unless detail is requested."
+    )
+    user_text = transcript.strip()
+    if image_b64:
+        detail = env("OPENAI_IMAGE_DETAIL", "low").lower()
+        if detail not in {"low", "high", "auto"}:
+            detail = "low"
+        user_content: str | list[dict[str, Any]] = [
+            {"type": "text", "text": user_text},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:image/jpeg;base64,{image_b64}",
+                    "detail": detail,
+                },
+            },
+        ]
+    else:
+        user_content = user_text
+
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    messages.extend(list(_robot_history))
+    messages.append({"role": "user", "content": user_content})
+
+    payload = {
+        "model": env("OPENAI_MODEL") or env("OPENAI_VISION_MODEL", "gpt-4.1-mini"),
+        "messages": messages,
+        "temperature": float(env("OPENAI_TEMPERATURE", env("LLM_TEMPERATURE", "0.2"))),
+        "max_tokens": int(env("OPENAI_MAX_TOKENS", env("LLM_MAX_TOKENS", "280"))),
+    }
+    base_url = env("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = float(env("OPENAI_TIMEOUT", "30"))
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(
+                f"{base_url}/chat/completions",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        detail = exc.response.text[:300] if exc.response is not None else str(exc)
+        raise HTTPException(status_code=502, detail=f"OpenAI request failed: {detail}") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"OpenAI unreachable: {exc}") from exc
+
+    data = response.json()
+    choices = data.get("choices", [])
+    answer = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+    if not answer:
+        raise HTTPException(status_code=502, detail="OpenAI returned an empty answer")
+
+    _robot_history.append({"role": "user", "content": transcript})
+    _robot_history.append({"role": "assistant", "content": answer})
+    return answer
+
+
 async def ask_brain180(transcript: str, image_b64: str | None = None) -> str:
     base_url = env("BRAIN180_BASE_URL", "http://127.0.0.1:3001").rstrip("/")
     token = env("BRAIN180_DEVICE_TOKEN")
@@ -216,9 +282,11 @@ async def ask_llm(transcript: str, image_b64: str | None = None) -> str:
     provider = env("LLM_PROVIDER", "ollama").lower()
     if provider == "brain180":
         return await ask_brain180(transcript, image_b64)
+    if provider == "openai":
+        return await ask_openai_direct(transcript, image_b64)
     if provider == "ollama":
         return await ask_ollama(transcript)
-    if provider in {"vllm", "openai"}:
+    if provider == "vllm":
         return await ask_openai_compatible(transcript)
     raise HTTPException(status_code=500, detail=f"Unsupported LLM_PROVIDER: {provider}")
 
@@ -300,12 +368,9 @@ async def see(
     """Vision turn for the camera firmware: PCM (or text) + a JPEG frame.
 
     Mirrors /api/turn but multipart, so the ESP32-S3 (Waveshare 3.5B + OV5640)
-    can attach what the camera sees. Requires LLM_PROVIDER=brain180 (only the
-    Brain180 bridge forwards images to a vision model).
+    can attach what the camera sees. Use LLM_PROVIDER=brain180 for the Brain180
+    bridge, or LLM_PROVIDER=openai for the fast cloud fallback.
     """
-    if env("LLM_PROVIDER", "ollama").lower() != "brain180":
-        raise HTTPException(status_code=400, detail="/api/see requires LLM_PROVIDER=brain180")
-
     if text and text.strip():
         transcript = text.strip()
     else:
@@ -322,7 +387,7 @@ async def see(
         if raw:
             image_b64 = base64.b64encode(raw).decode("ascii")
 
-    answer = await ask_brain180(transcript, image_b64)
+    answer = await ask_llm(transcript, image_b64)
     key = hashlib.sha256(f"{transcript}\n{answer}".encode("utf-8")).hexdigest()[:16]
     audio_url = synthesize_with_piper(answer, key)
     return {"transcript": transcript, "answer": answer, "audio_url": audio_url}
