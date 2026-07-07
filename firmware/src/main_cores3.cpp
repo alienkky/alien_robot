@@ -92,7 +92,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v48";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v49";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -990,11 +990,31 @@ void settleAudioAfterCamera() {
   M5.Speaker.end();
   M5.Mic.end();
   delay(10);
+  // v48 proved begin() returns success while the codecs stay dead. Split the
+  // failure: probe whether each chip even ACKs its address on the bus.
+  //   NO-ACK  -> the chip fell off the bus (bus/power level) -> recover + retry.
+  //   ACK but still dead later -> register-level corruption begin() can't clear.
+  const uint8_t kEs7210Addr = 0x40, kAw88298Addr = 0x36;
+  for (int attempt = 0; attempt < 3; attempt++) {
+    const bool micAck = M5.In_I2C.scanID(kEs7210Addr);
+    const bool spkAck = M5.In_I2C.scanID(kAw88298Addr);
+    Serial.printf("[audio] probe %d: es7210(mic)=%s aw88298(spk)=%s\n", attempt + 1,
+                  micAck ? "ACK" : "NO-ACK", spkAck ? "ACK" : "NO-ACK");
+    if (micAck && spkAck) break;
+    recoverSharedI2C();   // chip(s) off the bus — clock it free and probe again
+    delay(20);
+  }
   const bool micOk = M5.Mic.begin();
   M5.Mic.end();
   const bool spkOk = M5.Speaker.begin();
+  // Audible self-test: a short beep right after re-init. Hearing the beep but not
+  // the TTS answer = playback path bug; hearing NOTHING = the AW88298 really is
+  // dead past begin()'s reach. Diagnostic — remove once the speaker is settled.
+  M5.Speaker.setVolume(g_speakerVolume);
+  M5.Speaker.tone(880, 80);
+  delay(120);
   M5.Speaker.end();
-  Serial.printf("[audio] codecs re-initialized after camera (mic=%d spk=%d)\n",
+  Serial.printf("[audio] codecs re-initialized after camera (mic=%d spk=%d) + beep test\n",
                 micOk ? 1 : 0, spkOk ? 1 : 0);
 }
 
@@ -1546,7 +1566,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (version on pull-down + audio logging)\n", kFwVersion);
+  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (codec probe + beep self-test)\n", kFwVersion);
   // Those scary red "E (...) i2c: i2c_driver_delete(411)", "gdma: gdma_disconnect",
   // and "I2S: ...has not installed" lines are HARMLESS teardown noise from the
   // camera's per-turn driver install/free — NOT failures. They made the serial look
