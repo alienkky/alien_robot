@@ -92,6 +92,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
+constexpr const char *kFwVersion = "v48";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -391,6 +392,15 @@ void showBattery() {
   else if (chg) M5.Display.printf("배터리 %d%%  충전중", pct);
   else M5.Display.printf("배터리 %d%%", pct);
   M5.Display.setFont(&fonts::Font0);
+
+  // Firmware version, centred in the bar, so it's easy to confirm which build is
+  // actually flashed (asked for: show version on the pull-down).
+  M5.Display.setTextSize(1);
+  M5.Display.setTextColor(TFT_CYAN);
+  char ver[24];
+  snprintf(ver, sizeof(ver), "fw %s", kFwVersion);
+  M5.Display.setCursor(w / 2 - (M5.Display.textWidth(ver) / 2), 15);
+  M5.Display.print(ver);
 
   delay(2500);
   drawFace(curEmo, true);  // restore the face
@@ -1145,12 +1155,19 @@ int32_t applyMicGain(int16_t *buf, size_t n) {
 // Plays a WAV body on the speaker: parse the sample rate from the 44-byte
 // header, skip the header, stream the PCM to the AW88298 via M5.Speaker.
 bool playWav(const uint8_t *wav, size_t len) {
-  if (len <= 44) return false;
+  if (len <= 44) {
+    Serial.printf("[audio] playWav: too small (%u bytes) — not a WAV\n", static_cast<unsigned>(len));
+    return false;
+  }
   uint32_t rate = static_cast<uint32_t>(wav[24]) | (static_cast<uint32_t>(wav[25]) << 8) |
                   (static_cast<uint32_t>(wav[26]) << 16) | (static_cast<uint32_t>(wav[27]) << 24);
   if (rate < 8000 || rate > 48000) rate = kSampleRate;  // fall back if not a std WAV
   const int16_t *samples = reinterpret_cast<const int16_t *>(wav + 44);
   size_t n = (len - 44) / 2;
+  // Prove the speaker path ran and with what volume — a valid wav here + no sound
+  // means the AW88298 speaker codec, not the server.
+  Serial.printf("[audio] playWav: %u samples, rate=%u, vol=%d\n",
+                static_cast<unsigned>(n), static_cast<unsigned>(rate), g_speakerVolume);
 
   M5.Mic.end();  // free the shared I2S before switching to the speaker
   M5.Speaker.begin();
@@ -1322,8 +1339,12 @@ bool fetchAndPlay(const String &audioUrl) {
   http.setTimeout(60000);
   if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
   int code = http.GET();
+  int len = http.getSize();
+  // ALWAYS log the download result — this pinpoints a no-voice as server-side
+  // (code != 200 = auth/404/etc; len <= 0 = server sent an empty file) vs
+  // device-side (200 + bytes here, but no sound = speaker/volume).
+  Serial.printf("[audio] GET -> %d, len=%d, vol=%d\n", code, len, g_speakerVolume);
   if (code == 200) {
-    int len = http.getSize();
     if (len > 0) {
       uint8_t *wav = static_cast<uint8_t *>(ps_malloc(len));
       if (wav) {
@@ -1339,16 +1360,20 @@ bool fetchAndPlay(const String &audioUrl) {
           if (avail > 0) got += stream->readBytes(wav + got, min(avail, len - got));
           else delay(1);
         }
+        Serial.printf("[audio] downloaded %d/%d bytes%s\n", got, len,
+                      interrupted ? " (interrupted)" : ", playing");
         if (!interrupted) interrupted = playWav(wav, got);
         free(wav);
       } else {
+        Serial.println("[audio] ps_malloc failed for wav");
         interrupted = waitAnswerInterruptWindow(1500);
       }
     } else {
+      Serial.println("[audio] server returned 200 but empty body — TTS produced no audio");
       interrupted = waitAnswerInterruptWindow(1500);
     }
   } else {
-    Serial.printf("[http] audio GET -> %d\n", code);
+    Serial.printf("[audio] GET failed (%d) — server/auth issue, no voice\n", code);
     interrupted = waitAnswerInterruptWindow(1500);
   }
   http.end();
@@ -1521,7 +1546,7 @@ void setup() {
 
   Serial.begin(115200);
   delay(300);
-  Serial.println("[boot] alien_robot CoreS3 fw route-A v47 (mute benign i2c/gdma/i2s log noise)");
+  Serial.printf("[boot] alien_robot CoreS3 fw route-A %s (version on pull-down + audio logging)\n", kFwVersion);
   // Those scary red "E (...) i2c: i2c_driver_delete(411)", "gdma: gdma_disconnect",
   // and "I2S: ...has not installed" lines are HARMLESS teardown noise from the
   // camera's per-turn driver install/free — NOT failures. They made the serial look
