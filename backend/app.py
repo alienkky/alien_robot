@@ -510,6 +510,35 @@ async def reset() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ── Remote robot commands (ALI-21: Brain180 tutor icon → robot capture) ──
+# The robot is an HTTP client only, so remote triggers work by queueing a
+# command here; the firmware polls GET /api/command every few seconds while
+# idle and executes what it finds. Brain180's server forwards the tutor-icon
+# click to POST /api/robot-command (device token stays server-side).
+_robot_command: str | None = None
+
+
+@app.post("/api/robot-command")
+async def robot_command(request: Request) -> dict[str, str]:
+    require_api_token(request)
+    global _robot_command
+    body = await request.json()
+    cmd = (body.get("command") or "").strip().lower()
+    if cmd not in {"capture"}:
+        raise HTTPException(status_code=400, detail=f"unknown command: {cmd}")
+    _robot_command = cmd
+    log.info("[cmd] queued remote command: %s", cmd)
+    return {"status": "queued", "command": cmd}
+
+
+@app.get("/api/command")
+async def get_command(request: Request) -> dict[str, str]:
+    require_api_token(request)
+    global _robot_command
+    cmd, _robot_command = _robot_command, None
+    return {"command": cmd or "none"}
+
+
 @app.get("/audio/{filename}")
 async def audio(filename: str, request: Request) -> FileResponse:
     require_api_token(request)

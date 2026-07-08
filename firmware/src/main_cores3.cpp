@@ -59,6 +59,9 @@
 // loop can't hang. Camera is still inited on-demand AFTER recordAudio() so the
 // mic is never at risk. If a board still misbehaves, CAM_ENABLE 0 in
 // config_cores3.h falls back to the proven audio-only loop.
+#ifndef CAM_HI_RES
+#define CAM_HI_RES 1   // 1 = VGA 640x480 capture (text-legible), 0 = QVGA 320x240
+#endif
 #ifndef CAM_ENABLE
 #define CAM_ENABLE 1
 #endif
@@ -93,7 +96,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v57";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v58";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -160,7 +163,15 @@ camera_config_t makeCameraConfig() {
   c.ledc_timer = LEDC_TIMER_0;
   c.ledc_channel = LEDC_CHANNEL_0;
   c.pixel_format = PIXFORMAT_RGB565;  // GC0308 has no HW JPEG; encode in SW
+  // v58: capture at the GC0308's native maximum VGA (640x480) so the vision
+  // model gets 4x the pixels — big text (book titles, whiteboard writing)
+  // becomes legible. It is still a fixed-focus 0.3MP sensor: small print will
+  // stay blurry, that is a hardware ceiling. CAM_HI_RES=0 reverts to QVGA.
+#if CAM_HI_RES
+  c.frame_size = FRAMESIZE_VGA;       // 640x480 — text-legible vision payload
+#else
   c.frame_size = FRAMESIZE_QVGA;      // 320x240 — small vision payload
+#endif
   c.fb_count = 2;
   c.fb_location = CAMERA_FB_IN_PSRAM;
   // GRAB_LATEST (not WHEN_EMPTY): always return the newest frame and recycle old
@@ -890,7 +901,17 @@ void faceInit() {
 void showPhoto(camera_fb_t *fb) {
   if (!fb || !fb->buf) return;
   M5.Display.setSwapBytes(CAM_SWAP_BYTES != 0);  // flip in config if colors look wrong
-  M5.Display.pushImage(0, 0, fb->width, fb->height, reinterpret_cast<const uint16_t *>(fb->buf));
+  if (fb->width > static_cast<size_t>(M5.Display.width())) {
+    // v58: VGA frame on the 320x240 LCD — scale down to fit (0.5x).
+    const float zx = static_cast<float>(M5.Display.width()) / fb->width;
+    const float zy = static_cast<float>(M5.Display.height()) / fb->height;
+    M5.Display.pushImageRotateZoom(M5.Display.width() / 2.0f, M5.Display.height() / 2.0f,
+                                   fb->width / 2.0f, fb->height / 2.0f, 0.0f, zx, zy,
+                                   fb->width, fb->height,
+                                   reinterpret_cast<const uint16_t *>(fb->buf));
+  } else {
+    M5.Display.pushImage(0, 0, fb->width, fb->height, reinterpret_cast<const uint16_t *>(fb->buf));
+  }
   M5.Display.setSwapBytes(false);
   M5.Display.setFont(&fonts::efontKR_16);
   M5.Display.setTextColor(TFT_WHITE);
@@ -1380,8 +1401,15 @@ bool httpBegin(HTTPClient &http, WiFiClientSecure &secure, WiFiClient &plain, co
 // Builds multipart/form-data with the audio PCM and JPEG frame, POSTs /api/see.
 // Returns the response JSON body (empty on failure). Identical contract to the
 // Waveshare firmware so the 4090 gateway is unchanged.
-String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_t jpegLen) {
+String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_t jpegLen,
+               const char *textPrompt = nullptr) {
   const String boundary = "----alienrobotESP32boundary";
+  // v58: optional text part — a remote-triggered turn has no speech, so the
+  // question rides in the `text` field (the gateway then skips STT entirely).
+  const String textPart = (textPrompt && textPrompt[0])
+      ? ("--" + boundary + "\r\n"
+         "Content-Disposition: form-data; name=\"text\"\r\n\r\n" + String(textPrompt) + "\r\n")
+      : String();
   const String head =
       "--" + boundary + "\r\n"
       "Content-Disposition: form-data; name=\"audio\"; filename=\"a.pcm\"\r\n"
@@ -1396,7 +1424,7 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
   // POST audio-only so the voice path (STT -> LLM -> TTS) can still be validated
   // during bring-up. The gateway may require the image for a vision turn.
   const bool hasImage = (jpeg != nullptr && jpegLen > 0);
-  size_t bodyLen = head.length() + audioLen +
+  size_t bodyLen = textPart.length() + head.length() + audioLen +
                    (hasImage ? midA.length() + imgHead.length() + jpegLen : 0) +
                    tail.length();
   uint8_t *body = static_cast<uint8_t *>(ps_malloc(bodyLen));
@@ -1405,6 +1433,7 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
     return String();
   }
   size_t p = 0;
+  if (textPart.length()) { memcpy(body + p, textPart.c_str(), textPart.length()); p += textPart.length(); }
   memcpy(body + p, head.c_str(), head.length()); p += head.length();
   memcpy(body + p, audio, audioLen); p += audioLen;
   if (hasImage) {
@@ -1448,23 +1477,26 @@ String postSee(const uint8_t *audio, size_t audioLen, const uint8_t *jpeg, size_
 struct SeeJob {
   const uint8_t *audio; size_t audioLen;
   const uint8_t *jpeg;  size_t jpegLen;
+  const char *text;     // optional text prompt (remote-triggered turn)
   volatile bool done;
   String resp;
 };
 
 void seeJobTask(void *param) {
   SeeJob *j = static_cast<SeeJob *>(param);
-  j->resp = postSee(j->audio, j->audioLen, j->jpeg, j->jpegLen);
+  j->resp = postSee(j->audio, j->audioLen, j->jpeg, j->jpegLen, j->text);
   j->done = true;
   vTaskDelete(nullptr);
 }
 
 // Runs postSee off-thread and animates the thinking face until it returns.
 String postSeeThinking(const uint8_t *audio, size_t audioLen,
-                       const uint8_t *jpeg, size_t jpegLen) {
+                       const uint8_t *jpeg, size_t jpegLen,
+                       const char *textPrompt = nullptr) {
   static SeeJob job;               // static: outlives this frame; one turn at a time
   job.audio = audio; job.audioLen = audioLen;
   job.jpeg = jpeg;   job.jpegLen = jpegLen;
+  job.text = textPrompt;
   job.done = false;  job.resp = String();
 
   // 16 KB stack covers a plain-HTTP POST + getString(); a LAN URL does no TLS
@@ -1473,7 +1505,7 @@ String postSeeThinking(const uint8_t *audio, size_t audioLen,
   BaseType_t ok = xTaskCreatePinnedToCore(seeJobTask, "see", 16384, &job, 5, &h, 0);
   if (ok != pdPASS) {              // could not spawn — fall back to a blocking call
     Serial.println("[think] task spawn failed, blocking");
-    return postSee(audio, audioLen, jpeg, jpegLen);
+    return postSee(audio, audioLen, jpeg, jpegLen, textPrompt);
   }
 
   const uint32_t t0 = millis();
@@ -1570,7 +1602,7 @@ bool fetchAndPlay(const String &audioUrl) {
 // on the shared I2C bus is what corrupts the mic and jams touch, so retrying
 // WITHOUT it lets the mic settle on a clean bus and breaks the failure spiral.
 void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false,
-                bool showShot = false) {
+                bool showShot = false, const char *textPrompt = nullptr) {
   if (!pcm) {  // PSRAM record buffer never allocated — cannot record
     Serial.println("[turn] no PSRAM buffer, abort");
     faceSay(EMO_SAD, "PSRAM 없음");
@@ -1584,26 +1616,31 @@ void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false,
   g_tapToListenNext = true;
   g_tapToListenArmedMs = millis();
 
-  faceSay(EMO_LISTEN, "듣는 중...");
-  size_t samples = recordAudio(holdMode);
-  if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
-    Serial.println("[turn] too short, skip");
-    if (isFollowUp) { faceSay(EMO_NEUTRAL, ""); return; }  // silence ends the conversation, no nag
-    faceSay(EMO_NEUTRAL, "너무 짧아요 — 길게 말해줘");
-    return;
-  }
-  int32_t micPeak = applyMicGain(pcm, samples);  // boost quiet audio so STT hears it
-  if (micPeak < kMinSpeechPeakForServer) {
-    Serial.printf("[turn] speech too quiet (peak=%d < %d), skip camera/server\n",
-                  static_cast<int>(micPeak), static_cast<int>(kMinSpeechPeakForServer));
-    if (isFollowUp) {
-      Serial.println("[turn] follow-up silent — conversation over, back to idle");
-      faceSay(EMO_NEUTRAL, "");
+  size_t samples = 0;
+  if (textPrompt == nullptr) {
+    faceSay(EMO_LISTEN, "듣는 중...");
+    samples = recordAudio(holdMode);
+    if (samples < kSampleRate / 4) {  // < ~0.25s → ignore accidental taps
+      Serial.println("[turn] too short, skip");
+      if (isFollowUp) { faceSay(EMO_NEUTRAL, ""); return; }  // silence ends the conversation, no nag
+      faceSay(EMO_NEUTRAL, "너무 짧아요 — 길게 말해줘");
       return;
     }
-    faceSay(EMO_NEUTRAL, "소리가 작아요 — 다시 말해줘");
-    return;
+    int32_t micPeak = applyMicGain(pcm, samples);  // boost quiet audio so STT hears it
+    if (micPeak < kMinSpeechPeakForServer) {
+      Serial.printf("[turn] speech too quiet (peak=%d < %d), skip camera/server\n",
+                    static_cast<int>(micPeak), static_cast<int>(kMinSpeechPeakForServer));
+      if (isFollowUp) {
+        Serial.println("[turn] follow-up silent — conversation over, back to idle");
+        faceSay(EMO_NEUTRAL, "");
+        return;
+      }
+      faceSay(EMO_NEUTRAL, "소리가 작아요 — 다시 말해줘");
+      return;
+    }
   }
+  // textPrompt set = remote-triggered turn (Brain180 tutor icon): no recording,
+  // the question travels as the multipart `text` field and the gateway skips STT.
 
   // Camera is optional. When available: grab one frame, SHOW it on the display
   // ("what the robot saw"), then software-encode it to JPEG for the upload.
@@ -1651,7 +1688,7 @@ void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false,
   faceSay(EMO_THINK, "생각 중...");
   // Off-thread POST + animated thinking face (pupils dart, eyes blink) so the
   // robot doesn't freeze during the multi-second server round-trip.
-  String resp = postSeeThinking(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen);
+  String resp = postSeeThinking(reinterpret_cast<uint8_t *>(pcm), samples * 2, jpeg, jpegLen, textPrompt);
   if (jpeg) free(jpeg);
   if (resp.isEmpty()) {
     Serial.println("[turn] empty response");
@@ -1698,6 +1735,29 @@ void handleTurn(bool holdMode, bool allowCamera = true, bool isFollowUp = false,
     Serial.println("[turn] follow-up chain cap reached — touch to continue");
   }
   faceSay(EMO_NEUTRAL, "");  // idle: face only, no status text (bubble off)
+}
+
+// v58: remote command poll (Brain180 tutor icon → robot capture). The robot is
+// an HTTP client only, so it polls the gateway for queued commands while idle.
+// cam_task is suspended around the TLS request (the v50 crash condition), and a
+// failed poll is silently retried on the next tick.
+constexpr uint32_t kCmdPollMs = 5000;
+
+bool fetchRemoteCommandIsCapture() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  suspendCameraForNetwork();
+  HTTPClient http;
+  WiFiClientSecure secure;
+  WiFiClient plain;
+  httpBegin(http, secure, plain, String(AI_SERVER_BASE_URL) + "/api/command");
+  http.setConnectTimeout(4000);
+  http.setTimeout(4000);
+  if (strlen(DEVICE_TOKEN) > 0) http.addHeader("X-Device-Token", DEVICE_TOKEN);
+  const int code = http.GET();
+  String resp = (code == 200) ? http.getString() : String();
+  http.end();
+  resumeCameraAfterTurn();
+  return code == 200 && resp.indexOf("\"capture\"") >= 0;
 }
 
 void runQueuedImmediateTurns(uint8_t maxTurns = 2) {
@@ -1884,6 +1944,21 @@ void loop() {
     waitForTouchReleaseBounded();
     delay(10);
     return;
+  }
+  // v58: poll the gateway for remote commands (Brain180 tutor icon). Runs only
+  // when idle — never mid-press, mid-follow-up, or during stale-touch recovery.
+  static uint32_t lastCmdPoll = 0;
+  if (!g_followUpNext && !g_ignoreTouchUntilRelease && !td.isPressed() &&
+      millis() - lastCmdPoll > kCmdPollMs) {
+    lastCmdPoll = millis();
+    if (fetchRemoteCommandIsCapture()) {
+      Serial.println("[cmd] remote capture triggered (Brain180 tutor icon)");
+      g_followUpChain = 0;
+      handleTurn(/*holdMode=*/false, /*allowCamera=*/true, /*isFollowUp=*/false,
+                 /*showShot=*/true, "지금 카메라에 보이는 장면을 자세히 한국어로 설명해줘.");
+      runQueuedImmediateTurns();
+      return;
+    }
   }
   // v56 continuous conversation: an answered turn arms one automatic follow-up
   // listen. Speech chains into the next turn (context flows via the gateway's
