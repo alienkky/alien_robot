@@ -96,7 +96,7 @@ constexpr uint32_t kTouchReleaseWaitMs = 1200;    // never wait forever on a sta
 constexpr uint32_t kStaleTouchRecoverMs = 1000;   // retry I2C recovery while stale-pressed is ignored
 constexpr uint32_t kStaleTouchSoftUnlockMs = 3000; // stop blocking the loop if release stays stale
 constexpr uint32_t kTapToListenWindowMs = 15000;   // tap-to-listen only valid this long after a failed turn
-constexpr const char *kFwVersion = "v58";          // shown in the boot log AND the pull-down status bar
+constexpr const char *kFwVersion = "v59";          // shown in the boot log AND the pull-down status bar
 
 int16_t *pcm = nullptr;   // PSRAM record buffer (kMaxSamples int16 samples)
 bool cameraOk = false;
@@ -317,17 +317,21 @@ void drawFace(Emotion e, bool eyesOpen, int talkMouth = -1, int revealGlyphs = -
     c.print(faceText);
     c.setFont(&fonts::Font0);
   }
-  // v57: bottom button bar — [대화] = audio-only chat turn, [캡처] = photo turn
-  // (the only turn that shows the captured photo full-screen). Hidden while the
-  // speech bubble covers the bottom band.
+  // v57/v59: bottom button bar — [대화] = audio-only chat turn, [소리] = volume
+  // panel (replaces the hidden swipe-up gesture), [캡처] = photo turn (the only
+  // turn that shows the captured photo full-screen). Hidden while the speech
+  // bubble covers the bottom band.
   if (!bubbleOn) {
     const int bbh = 26, bby = h - bbh - 4;
     c.setFont(&fonts::efontKR_16);
     c.setTextSize(1);
-    c.drawRoundRect(6, bby, 92, bbh, 6, col);
     c.setTextColor(col);
+    c.drawRoundRect(6, bby, 92, bbh, 6, col);
     c.setCursor(6 + 30, bby + 5);
     c.print("대화");
+    c.drawRoundRect(w / 2 - 28, bby, 56, bbh, 6, col);
+    c.setCursor(w / 2 - 16, bby + 5);
+    c.print("소리");
     c.drawRoundRect(w - 98, bby, 92, bbh, 6, col);
     c.setCursor(w - 98 + 30, bby + 5);
     c.print("캡처");
@@ -1991,8 +1995,17 @@ void loop() {
           waitForTouchReleaseBounded();  // consume the rest of the gesture
           break;
         case BT_TAP:
+          // v59: three zones matching the drawn buttons — [대화 | 소리 | 캡처].
+          // The middle [소리] button replaces the hidden swipe-up gesture
+          // (which still works, but is no longer the only way in).
+          if (touchX >= 115 && touchX <= 205) {
+            Serial.println("[ui] button: 소리 (volume panel)");
+            showVolumeControl();
+            waitForTouchReleaseBounded();
+            break;
+          }
           g_followUpChain = 0;           // buttons start a fresh conversation chain
-          if (touchX < 160) {
+          if (touchX < 115) {
             Serial.println("[turn] button: 대화 (audio-only chat)");
             handleTurn(/*holdMode=*/false, /*allowCamera=*/false);
           } else {
