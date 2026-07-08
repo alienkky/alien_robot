@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import logging
@@ -480,6 +481,9 @@ async def see(
         raw = await image.read()
         if raw and looks_like_jpeg(raw):
             image_b64 = base64.b64encode(raw).decode("ascii")
+            # Mirror the frame to Brain180 so the browser 로봇 튜터 can pull
+            # "what the robot sees" — off the turn's critical path.
+            asyncio.create_task(push_frame_to_brain180(image_b64))
         elif raw:
             # Truncated/garbled camera frame — drop it and answer text-only
             # rather than letting the vision model 400 the whole turn.
@@ -510,6 +514,45 @@ async def reset() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# ── Brain180 presence: frame push + heartbeat ────────────────────────
+# The browser 로봇 튜터 shows a 🟢 indicator and can pull "what the robot sees".
+# Both are fed from here: every vision turn pushes its frame to Brain180's
+# POST /api/robot/frame (fire-and-forget), and the robot's 5s command poll is
+# converted into a throttled heartbeat so presence stays green while idle.
+_last_heartbeat = 0.0
+
+
+async def push_frame_to_brain180(image_b64: str) -> None:
+    base_url = env("BRAIN180_BASE_URL", "").rstrip("/")
+    token = env("BRAIN180_DEVICE_TOKEN")
+    if not base_url or not token:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{base_url}/api/robot/frame",
+                json={"image_base64": image_b64, "media_type": "image/jpeg"},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError as exc:
+        log.warning("[frame] push to brain180 failed: %s", exc)
+
+
+async def heartbeat_brain180() -> None:
+    base_url = env("BRAIN180_BASE_URL", "").rstrip("/")
+    token = env("BRAIN180_DEVICE_TOKEN")
+    if not base_url or not token:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.get(
+                f"{base_url}/api/robot/health",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+    except httpx.HTTPError:
+        pass  # presence just goes stale; next beat retries
+
+
 # ── Remote robot commands (ALI-21: Brain180 tutor icon → robot capture) ──
 # The robot is an HTTP client only, so remote triggers work by queueing a
 # command here; the firmware polls GET /api/command every few seconds while
@@ -534,7 +577,13 @@ async def robot_command(request: Request) -> dict[str, str]:
 @app.get("/api/command")
 async def get_command(request: Request) -> dict[str, str]:
     require_api_token(request)
-    global _robot_command
+    global _robot_command, _last_heartbeat
+    # Piggyback a throttled Brain180 heartbeat on the robot's idle poll so the
+    # browser presence indicator stays green between turns.
+    now = time.monotonic()
+    if now - _last_heartbeat > 20:
+        _last_heartbeat = now
+        asyncio.create_task(heartbeat_brain180())
     cmd, _robot_command = _robot_command, None
     return {"command": cmd or "none"}
 
