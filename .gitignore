@@ -1,0 +1,9 @@
+.pio/
+.vscode/
+__pycache__/
+*.py[cod]
+
+backend/.env
+backend/artifacts/
+firmware/include/config.h
+firmware/include/config_waveshare.h

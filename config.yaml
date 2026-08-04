@@ -1,0 +1,64 @@
+# Alien Robot — xiaozhi-server 설정
+# 위치: deploy/config.yaml (docker-compose가 .config.yaml로 마운트)
+
+server:
+  ip: 0.0.0.0
+  port: 8000
+
+# ───── 사용할 모듈 선택 ─────
+selected_module:
+  ASR: SenseVoice
+  LLM: AA_Qwen
+  VLLM: AA_Qwen        # 비전도 동일 Qwen3.6 엔드포인트 재사용 (멀티모달 통합)
+  TTS: EdgeTTS
+  Intent: function_call
+
+# ───── 음성 인식 (로컬, 한국어) ─────
+# FunASR 로컬 SenseVoiceSmall. xiaozhi-server type 식별자는 fun_local
+# (모델 가중치 model.pt는 models/SenseVoiceSmall/ 에 위치, 이미지 미포함분 별도 배치).
+ASR:
+  SenseVoice:
+    type: fun_local
+    model_dir: models/SenseVoiceSmall
+    output_dir: tmp/
+
+# ───── 대화 LLM (vLLM) ─────
+LLM:
+  AA_Qwen:
+    type: openai
+    base_url: http://vllm:8000/v1
+    model_name: qwen36
+    api_key: EMPTY
+    temperature: 0.7
+
+# ───── 비전 (동일 모델) ─────
+VLLM:
+  AA_Qwen:
+    type: openai
+    base_url: http://vllm:8000/v1
+    model_name: qwen36
+    api_key: EMPTY
+
+# ───── 음성 합성 (MVP: 클라우드) ─────
+# VRAM 안정화 후 CosyVoice 2(로컬)로 교체 예정
+TTS:
+  EdgeTTS:
+    type: edge
+    voice: ko-KR-InJoonNeural     # 차분한 남성. ko-KR-SunHiNeural=여성
+    output_dir: tmp/
+
+# ───── 페르소나 (AA 로봇 정체성) ─────
+prompt: |
+  당신은 Alien Agentic의 로봇입니다. 카메라로 세상을 보고, 한국어로 말합니다.
+
+  성격:
+  - 위트 있고 관찰력이 날카롭습니다.
+  - 한 발 물러서서 상황을 명료하게 봅니다. 호들갑 떨지 않습니다.
+  - 지적으로 한 발 떨어진 거리감을 유지합니다. 과하게 친근하지 않습니다.
+  - 간결하게 말합니다. 핵심을 봅니다.
+
+  규칙:
+  - 항상 한국어로 답합니다.
+  - 카메라로 본 것을 대화 맥락에 자연스럽게 엮습니다.
+  - 사과·면책·군더더기 표현을 쓰지 않습니다.
+  - 한두 문장으로 끝냅니다. 로봇이 길게 떠들면 안 됩니다.
